@@ -28,9 +28,8 @@ They even said it at their Reddit:::
 11. [Patching the APK](#11-patching-the-apk)
 12. [Tutorial Hell](#12-tutorial-hell)
 13. [The Cash Server](#13-the-cash-server)
-14. [The Bug Graveyard](#14-the-bug-graveyard)
-15. [What Works Now](#15-what-works-now)
-16. [What I Learned](#16-what-i-learned)
+GGS. [GGS!](#GGs!-I-can-play-locally-now!)
+14. [What I Learned](#14-what-i-learned)
 
 ---
 
@@ -648,7 +647,7 @@ Port 3001. `node cash-server/server.js`. Done.
 
 ---
 
-##GGs! I can play locally now!
+## GGs! I can play locally now!
 <img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/94b065fa-951f-42d8-9b7f-4c1f963e35a8" />
 
 
@@ -681,7 +680,7 @@ Port 3001. `node cash-server/server.js`. Done.
 
 ---
 
-## 16. What I Learned
+## 14. What I Learned
 
 **Emulators are useless for IL2CPP hooking.** The houdini/ndk_translation layer doesn't just slow things down — it makes Frida's Interceptor corrupt memory. Real ARM64 silicon or nothing. (Hard to learn)
 
