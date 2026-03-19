@@ -126,6 +126,7 @@ How could you know exactly the data? WIRESHARK THAT BITCH!
 <img width="1569" height="905" alt="image" src="https://github.com/user-attachments/assets/063b9dfb-9108-42cd-86f3-c59d787aa5e3" />
 
 Basically I've enforced my local server to be at 05 and my phone to be at 04. (NOTE THIS)
+
 ---
 
 ## 4. Cracking the Protocol
@@ -147,11 +148,13 @@ The PCAPs showed the raw TCP stream. Cross-referencing with `dump.cs`, the NRpc 
 
 Each segment length is a varint32 encoding `actual_size + 1`. The `0x00` terminator works because a zero-length segment would encode as `1`, so `0` is unambiguous as "end of packet". Elegant.
 
-The encryption? DES-CBC. Found the key and IV straight in `dump.cs` under `NRpcParams`:
+The encryption? DES-CBC. Found the key and IV straight in `dump.cs` (Plaintext btw):
+
+Censoring those okay? just the tip so you know we real!
 
 ```
-Key: 7e9ac962  (8 bytes UTF-8)
-IV:  01c20de0  (8 bytes UTF-8)
+Key: 7e9xxxxxxxxxx  (8 bytes UTF-8)
+IV:  01xxxxxxxxxxxx (8 bytes UTF-8)
 ```
 
 Later confirmed these with Frida hooks on the actual Encrypt/Decrypt calls. They matched.
@@ -166,7 +169,7 @@ field 3 (string) = request token (UUID, ties request to response)
 
 The body (segment 1) is method-specific protobuf, encrypted. Every method's fields map directly to the classes in `dump.cs`.
 
-To decode the PCAPs, I wrote a series of Node.js scripts:
+To decode the PCAPs, I wrote a series of Node.js scripts (Node cuz I'm lazy and to speed up asked some AI to do a .js for me, btw the AI was lazier and couldn't understand the technical requirements.... It was a nightmare):
 
 ```javascript
 // decode_pcap.js  — basic NRpc decoder, generic protobuf + DES-CBC
@@ -225,7 +228,7 @@ I also ran Ghidra with IL2CppDumper's scripts (`ghidra.py`, `ghidra_with_struct.
 
 ---
 
-## 6. The Emulator Problem (Spoiler: It Doesn't Work)
+## 6. The Emulator INCIDENT (Spoiler: It Doesn't Work)
 
 First attempt: hook `libil2cpp.so` on an x86_64 Android emulator (BlueStacks, Android Studio AVD). Seemed reasonable — run the game, attach Frida, read traffic.
 
@@ -242,12 +245,17 @@ Here's why: `libil2cpp.so` is compiled for ARM64. On an x86_64 emulator, it runs
 I tried everything. Direct hook on `libil2cpp.so` — SIGSEGV. `Module.findExportByName` — IL2CPP doesn't use standard ELF exports. Java-layer hooks — can't reach NRpc, it's all native. ARM64 system image on AVD — painfully slow, still unstable.
 
 Dead end. No workaround exists. If you want to hook IL2CPP, you need real ARM64 hardware. Period.
+My solution for it?
+I bought a trash phone from the times where this game was just released and root it... GOOOD LOOORD!!!! Probably that was the hardest part in this entire process... U guys have no Idea (or maybe do) of HOW MUCH TIME AND EFFORT IT IS NOWADAYS TO ROOT A PHONE!!!!!! Last time I did this on a Android device we had to download idk, superRoot.apk or shit like this, it was 4 minutes and BOOM, roooot! Now I had to redo the boot.img!!!!!!
+
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/b1da95ff-f7e6-4bb8-bc04-b2c14a06d7d2" />
+
 
 ---
 
 ## 7. Going Physical — Motorola One Vision
 
-Pulled out a **Motorola One Vision** (ARM64, Android 9). Native ARM64 — no translation layer, no houdini nonsense.
+Pulled out the craziest sexiest mf 2016ish **Motorola** (ARM64, Android 9). Native ARM64 — no translation layer, no houdini nonsense.
 
 Set up Frida:
 
@@ -275,7 +283,9 @@ Interceptor.attach(base.add(0x26CBA54), {
 
 Worked. First try. Clean attach, no crash, plaintext NRpc data streaming across the console. The black box was open.
 
-With a physical device on WiFi, the network setup changed. PC (server) at `192.168.0.5`, Motorola at `192.168.0.X` via DHCP. Had to set `PUBLIC_HOST` on the server and update build scripts to use the LAN IP instead of `10.0.2.2` (the emulator's host alias). Small price for actually working hooks.
+With a physical device on WiFi, the network setup changed. PC (server) at `192.168.0.5`, Motorola at `192.168.0.X` via DHCP. Had to set `PUBLIC_HOST` on the server and update build scripts to use the LAN IP instead of the emulator's host alias. Small price for actually working hooks.
+
+20$ USD btw, the phone was 20$.
 
 ---
 
@@ -284,6 +294,70 @@ With a physical device on WiFi, the network setup changed. PC (server) at `192.1
 The instrumentation script went through three generations.
 
 `hhproxy_aggressive.js` — first attempt. Hooked everything: libc, Java, IL2CPP, Unity engine internals. Caused random crashes and instability. Learned the hard way that less is more.
+
+```
+Log result example:
+[HHPROXY/GLOG] [WARN] \u542f\u52a8 Lua \u865a\u62df\u673a
+[HHPROXY/GLOG] [ERROR] [Effect/vfx_activity_slotsmachine] load error!!!
+[HHPROXY/GLOG] [ERROR] [UIMaterial/AlphaTexture] load error!!!
+[HHPROXY/GLOG] [ERROR] [UI/Lobby/UILobbyPlayer] load error!!!
+[HHPROXY/GLOG] [ERROR] [UI/Lobby/UILobbyMenu] load error!!!
+[HHPROXY/GLOG] [ERROR] [UI/Lobby/Lua/UILuaChat] load error!!!
+[HHPROXY/GLOG] [ERROR] [UI/Lobby/UILobbyMap] load error!!!
+[HHPROXY/GLOG] [ERROR] [Actor/Barrier] load error!!!
+[HHPROXY/GLOG] [ERROR] [GuildBattle/FogQuad] load error!!!
+[HHPROXY/GLOG] [ERROR] [Model/aideha] load error!!!
+[HHPROXY/GLOG] [ERROR] [Game/AttackRadiusUI] load error!!!
+[HHPROXY/GLOG] [ERROR] [SceneAssemble/Effects/level00_fog] load error!!!
+[HHPROXY/HTTP] >> http://server-kp.hyperheroes.net:9050/login/guest/guestlogin?guest=a163dad3-b3bd-472e-9e99-48ce980b4f4e&channel=600001
+[HHPROXY/GLOG] [ERROR] [ModelFBX/aideha] load error!!!
+[HHPROXY/HTTP] >> http://activation.hyperheroes.net:1888/globalservice/account/accountList?xdId=a163dad3-b3bd-472e-9e99-48ce980b4f4e&md5Str=B327F475087FBAD14EF2A07C9DBE27E4
+[HHPROXY/HTTP] >> http://serverlist.hyperheroes.net//serverlist/api/checkServerStatus?channel=600001&platform=2&version=1.1.80&serverId=1110&xdId=a163dad3-b3bd-472e-9e99-48ce980b4f4e
+[HHPROXY/HTTP] >> http://resource.hyperheroes.net/2021120801/600001/Android/NBundleInfos.bytes?v=34
+[HHPROXY/HTTP] >> http://myip.hyperheroes.net:1053/myip
+[HHPROXY/HTTP] >> http://server-kp.hyperheroes.net:9050/login/check/getExt?xdId=a163dad3-b3bd-472e-9e99-48ce980b4f4e&channelId=600001
+[HHPROXY/CONN] >> SendConnect(game-na.hyperheroes.net:9150)
+[HHPROXY/NETLOG] SendConnect host = game-na.hyperheroes.net port = 9150
+[HHPROXY/PUSH] >> InitPushCallBack delegate=0x6e502a4300
+[HHPROXY/PUSH]    method_ptr = 0x6e93442c00
+[HHPROXY/PUSH]    -> libil2cpp.so+0x2702c00
+[HHPROXY/PUSH]    -> HOOKED push handler at 0x6e93442c00
+[HHPROXY/SEND] >>> XDLogin token=46b6bbb7-3a7b-4490-89a5-9895de894f1b
+[HHPROXY/SEND] >>> XDLogin (prebuilt)
+[HHPROXY/ENC] >>> [XDLogin] plain 130B: 0a 24 61 31 36 33 64 61 64 33 2d 62 33 62 64 2d 34 37 32 65 2d 39 65 39 39 2d 34 38 63 65 39 38 30 62 34 66 34 65 12 20 38 36 34 38 46 46 41 32 35 45 41 42 46 33 39 46 42 44 41 39 31 45 36 45 30 42 42 42 32 44 42 34 1a 34 08 02 12 06 31 2e 31 2e 38 30 1a 24 62 64 36 30 37 36 65 65 2d 36 63 62 35 2d 34 38 65 33 2d 38 61 65 65 2d 31 31 64 64 38 36 35 66 62 38 36 66 30 eb fd 3f 28 01 30 1c
+[HHPROXY/GLOG] [WARN] SendConnect host = game-na.hyperheroes.net port = 9150
+[HHPROXY/NETLOG] OnConnected Finish \u8fde\u63a5\u6210\u529f!
+[HHPROXY/GLOG] [WARN] OnConnected Finish \u8fde\u63a5\u6210\u529f!
+[HHPROXY/HB] >> HeartBeat #1
+[HHPROXY/RECV] <<< ? err=0 token=46b6bbb7-3a7b-4490-89a5-9895de894f1b segs=2
+[HHPROXY/DEC] <<< [?] 334B: 0a cb 02 0a 68 08 fd e0 02 12 06 34 35 31 38 31 26 18 00 22 04 63 30 30 32 2a 06 63 32 62 67 6b 31 40 01 48 00 50 00 58 00 60 00 70 00 78 b9 17 80 01 00 88 01 00 90 01 00 98 01 00 b0 01 00 b8 01 00 c0 01 00 c8 01 f5 03 d0 01 00 d8 01 00 e0 01 00 e8 01 00 f0 01 00 f8 01 00 80 02 00 88 02 01 90 02 00 98 02 00 a0 02 00 a8 02 00 12 12 08 3c 10 02 18 00 20 fc 81 d9 cd 06 28 00 30 3c 38 00 1a 0e 08 0a 10 02 18 00 20 fc 81 d9 cd 06 28 00 22 0a 08 32 10 00 18 00 28 00 30 32 28 b0 f3 fe ff ff ff ff ff ff 01 78 00 8a 01 15 67 77 2d 6e 61 2e 68 79 70 65 72 68 65 72 6f 65 73 2e 6e 65 74 90 01 b8 49 98 01 d6 08 a2 01 2b 31 31 31 30 5f 34 35 31 38 31 5f 37 65 63 63 65 61 62 32 64 35 65 62 34 33 64 61 38 61 66 65 36 30 39 66 33 34 32 39 36 63 66 34 aa 01 00 b0 01 a0 86 da cd 06 ba 01 1b 63 68 61 74 2d 63 6c 69 65 6e 74 2e 68 79 70 65 72 68 65 72 6f 65 73 2e 6e 65 74 c0 01 d2 47 d2 05 20 35 42 35 33 41 42 36 41 37 41 34 34 41 46 43 33 31 39 39 41 42 44 36 32 39 41 35 32 30 34 37 46 a0 06 fb 81 d9 cd 06
+[HHPROXY/CB] <<< CALLBACK: ?(raw=0x6e502a4080) error=0
+[HHPROXY/HTTP] >> https://e.tapdb.net/identify
+[HHPROXY/HTTP] >> https://e.tapdb.net/event
+[HHPROXY/SEND] >>> CommonUserData token=f0669b5f-6371-4734-9842-ff5cfb0b0358
+[HHPROXY/SEND] >>> CommonUserData (prebuilt)
+[HHPROXY/ENC] >>> [CommonUserData] plain 2B: 08 01
+[HHPROXY/RECV] <<< ? err=0 token=f0669b5f-6371-4734-9842-ff5cfb0b0358 segs=3
+[HHPROXY/DEC] <<< [?] 6495B: 0a de 08 0a b7 05 08 00 10 00 1a 16 08 01 10 8b db 35 18 00 20 05 28 a0 9c 01 30 a0 fe 0a 38 01 40 09 1a 16 08 02 10 8c db 35 28 f0 01 30 f0 10 38 01 40 09 48 00 50 00 58 00 1a 10 08 03 10 8d db 35 28 a0 06 30 90 1c 38 01 40 09 1a 13 08 04 10 f4 db 35 28 50 30 80 05 38 01 40 08 60 00 68 00 1a 12 08 05 10 f4 db 35 28 c8 01 30 a0 06 38 01 40 08 70 00 22 0a 08 84 8e 06 10 e0 c6 88 e0 05 22 0a 08 a0 8d 06 10 e0 ab 98 b4 05 22 0a 08 b8 8d 06 10 e0 ab 98 b4 05 22 0a 08 f5 8d 06 10 e0 c6 88 e0 05 22 0a 08 a7 8d 06 10 e0 ab 98 b4 05 22 0a 08 83 8e 06 10 e0 ab 98 b4 05 22 0a 08 f0 8d 06 10 e0 c6 88 e0 05 22 0a 08 f8 8d 06 10 e0 c6 88 e0 05 22 0a 08 e6 8d 06 10 e0 ab 98 b4 05 22 0a 08 b4 8d 06 10 e0 ab 98 b4 05 22 0a 08 b2 8d 06 10 e0 ab 98 b4 05 22 0a 08 d7 8d 06 10 e0 c6 88 e0 05 22 0a 08 b7 8d 06 10 e0 ab 98 b4 05 22 0a 08 c7 8e 06 10 e0 ab 98 b4 05 22 0a 08 e5 8d 06 10 e0 ab 98 b4 05 22 0a 08 dc 8d 06 10 e0 ab 98 b4 05 22 0a 08 bf 8d 06 10 e0 ab 98 b4 05 22 0a 08 a2 8d 06 10 e0 ab 98 b4 05 22 0a 08 bd 8d 06 10 e0 ab 98 b4 05 22 0a 08 f2 8d 06 10 e0 c6 88 e0 05 22 0a 08 bb 8d 06 10 e0 ab 98 b4 05 22 0a 08 d9 8d 06 10 e0 c6 88 e0 05 22 0a 08 ba 8d 06 10 e0 ab 98 b4 05 22 0a 08 be 8d 06 10 e0 ab 98 b4 05 22 0a 08 b0 8d 06 10 e0 ab 98 b4 05 22 0a 08 f4 8d 06 10 e0 ab 98 b4 05 22 0a 08 da 8d 06 10 e0 ab 98 b4 05 22 0a 08 a8 8d 06 10 e0 ab 98 b4 05 22 0a 08 81 8e 06 10 e0 ab 98 b4 05 22 0a 08 ad 8d 06 10 e0 ab 98 b4 05 22 0a 08 ff 8d 06 10 e0 ab 98 b4 05 22 0a 08 a1 8d 06 10 e0 ab 98 b4 05 22 0a 08 ab 8d 06 10 e0 ab 98 b4 ...(6495B)
+[HHPROXY/DEC] <<< [?] 8B: 0a 06 08 00 10 00 20 00
+[HHPROXY/CB] <<< CALLBACK: ?(raw=0x6e503c6a80) error=0
+[HHPROXY/CONN] >> SendConnect(chat-client.hyperheroes.net:9170)
+[HHPROXY/NETLOG] SendConnect host = chat-client.hyperheroes.net port = 9170
+[HHPROXY/PUSH] >> InitPushCallBack delegate=0x6e4f827f00
+[HHPROXY/PUSH]    method_ptr = 0x6e93442c74
+[HHPROXY/PUSH]    -> libil2cpp.so+0x2702c74
+[HHPROXY/PUSH]    -> HOOKED push handler at 0x6e93442c74
+[HHPROXY/SEND] >>> LoginChat token=ad160fec-be7c-4209-a6ea-de37c6ad63fa
+[HHPROXY/SEND] >>> LoginChat (prebuilt)
+[HHPROXY/ENC] >>> [LoginChat] plain 682B: 0a 0a 31 31 31 30 5f 34 35 31 38 31 12 9b 05 7b 22 63 6f 6e 74 65 6e 74 22 3a 22 22 2c 20 22 75 73 65 72 49 64 22 3a 22 34 35 31 38 31 22 2c 20 22 75 73 65 72 4c 65 76 65 6c 22 3a 22 31 22 2c 20 22 75 73 65 72 4e 61 6d 65 22 3a 22 34 35 31 38 31 26 22 2c 20 22 76 69 70 4c 65 76 65 6c 22 3a 22 30 22 2c 20 22 61 6c 6c 46 69 67 68 74 69 6e 67 4e 75 6d 22 3a 22 32 32 33 32 22 2c 20 22 67 75 69 6c 64 49 64 22 3a 22 30 22 2c 20 22 67 75 69 6c 64 4e 61 6d 65 22 3a 22 22 2c 20 22 7a 6f 6e 65 49 64 22 3a 22 31 31 31 30 22 2c 20 22 69 63 6f 6e 22 3a 22 63 30 30 32 22 2c 20 22 69 63 6f 6e 4b 75 61 6e 67 22 3a 22 63 32 62 67 6b 31 22 2c 20 22 72 6f 6f 6d 49 64 22 3a 22 22 2c 20 22 6d 73 67 54 79 70 65 22 3a 22 30 22 2c 20 22 74 69 6d 65 53 74 65 6d 70 22 3a 22 22 2c 20 22 6d 61 78 5f 66 69 67 68 74 5f 61 63 74 6f 72 22 3a 22 7b 5c 22 41 63 74 6f 72 31 5c 22 3a 5c 22 7b 5c 5c 5c 22 61 63 74 6f 72 49 64 5c 5c 5c 22 3a 5c 5c 5c 22 31 30 30 30 31 37 5c 5c 5c 22 2c 20 5c 5c 5c 22 61 63 74 6f 72 4c 65 76 65 6c 5c 5c 5c 22 3a 5c 5c 5c 22 31 5c 5c 5c 22 2c 20 5c 5c 5c 22 61 63 74 6f 72 53 74 61 72 5c 5c 5c 22 3a 5c 5c 5c 22 31 5c 5c 5c 22 2c 20 5c 5c 5c 22 61 63 74 6f 72 51 75 61 6c 69 74 79 5c 5c 5c 22 3a 5c 5c 5c 22 31 30 5c 5c 5c 22 7d 5c 22 2c 20 5c 22 41 63 74 6f 72 32 5c 22 3a 5c 22 7b 5c 5c 5c 22 61 63 74 6f 72 49 64 5c 5c 5c 22 3a 5c 5c 5c 22 31 30 30 30 30 33 5c 5c 5c 22 2c 20 5c 5c 5c 22 61 63 74 6f 72 4c 65 76 65 6c 5c 5c 5c 22 3a 5c 5c 5c 22 31 5c 5c 5c 22 2c 20 5c 5c 5c 22 61 63 74 6f 72 53 74 61 72 5c 5c 5c 22 3a 5c ...(682B)
+[HHPROXY/SEND] >>> OpenTreasurePage token=a5482458-e467-4272-bdda-45e4c8e461fa
+[HHPROXY/SEND] >>> OpenTreasurePage (prebuilt)
+[HHPROXY/GLOG] [WARN] SendConnect host = chat-client.hyperheroes.net port = 9170
+[HHPROXY/NETLOG] OnConnected Finish \u8fde\u63a5\u6210\u529f!
+[HHPROXY/GLOG] [WARN] OnConnected Finish \u8fde\u63a5\u6210\u529f!
+[HHPROXY/RECV] <<< ? err=0 token=a5482458-e467-4272-bdda-45e4c8e461fa segs=3
+[HHPROXY/DEC] <<< [?] decrypt returned null (enc was 8B)
+```
 
 `hhproxy_full.js` — intermediate. Narrowed down to game-relevant targets, still too many hooks.
 
@@ -310,15 +384,14 @@ LevelEnd debug   4 hooks on the b__0 callback for crash diagnosis
 This was the single most valuable tool in the entire project. Decrypted NRpc in real time. Logged every tutorial step by introId so I could replicate the exact sequence. Showed which field/index caused `ArgumentOutOfRangeException` in LevelEnd callbacks. Revealed the exact lifecycle order: `Awake → Start → InitFunctionMap → [RPCs] → UIGuide.Open(introId=2) → ...`
 
 ```powershell
-frida -U -f com.nkm.kp.hh -l MOD/hhproxy.js
-frida -U -f com.nkm.kp.hh -l MOD/hhproxy.js > execution.log  # persist everything
+frida -U -f com.nkm.kp.hh -l MOD/hhproxy.js > your.log  # persist everything
 ```
 
 ---
 
 ## 9. Building the Resource Server
 
-With the original servers dead, the game can't do anything. Can't download the Addressables catalog. Can't fetch asset bundles. Can't complete the HTTP bootstrap. Can't establish NRpc sessions. Total brick.
+With the original servers almost dead, the game can't do anything. Can't have proper support. Can't fetch account data. Can't complete the HTTP bootstrap (Yep, a lot of issues on the old servers). Can't establish legal requirements. MANY, hear me, MANY spend money in this game on the past, by 2019 the game was already dying when the company simply decided to abadon their FACEBOOK ID LOGIN... What does it mean? The game had only 2 options for logins, guest account or a Facebook SSO. Facebook ID dead, means no one could log in in their account anymore, THOUSANDS AND THOUSANDS WENT TO SPACE to a game with no support. 
 
 So I built a unified Node.js server (`resource-server/server.js`) that replaces everything. One process, 6+ ports:
 
@@ -330,26 +403,18 @@ Port 9151               TCP     NRpc Game — real-time battle zone
 Port 9152               TCP     NRpc Chat
 ```
 
-**First priority: mirror the assets before the CDN dies.**
-
-```powershell
-cd resource-server
-node download-assets.js    # reads catalog.json, downloads all 35 Addressable bundles
-node sync-updates.js       # downloads NBundleInfos manifest, fetches 126 update AssetBundles (8 parallel workers)
-```
-
 Everything saved to `mirror/`. CDN goes down tomorrow? Don't care.
 
 The HTTP side handles every endpoint the game expects:
 
 ```javascript
-// /notice.txt                          → empty (no announcements)
-// /activities*.html                    → local notice page
-// /serverlist/api/queryList            → THE KEY: redirect loginProxy + resourceUrl to our server
+// /notice.txt                          → empty (no announcements) We don't actually need this bro...
+// /activities*.html                    → local notice page The only news I've added was "not found"
+// /serverlist/api/queryList            → THE KEY: redirect loginProxy + resourceUrl to our server LOCAL FOREVER
 // /serverlist/api/checkServerStatus    → always online
 // /login/guest/guestlogin              → code=0&ext=<MD5> (guest account)
-// /globalservice/account/accountList   → XD SDK account listing
-// /myip                                → client's IP
+// /globalservice/account/accountList   → XD SDK account listing (Dead at this point since you can't login anyway)
+// /myip                                → client's IP (Yours to yourself)
 // /login/check/getExt                  → SHA-256 hash
 // /Addressables/.../*.json             → patched catalog (URLs rewritten to point at us)
 // /Addressables/.../*.hash             → static hash (forces catalog refresh)
@@ -359,7 +424,7 @@ The HTTP side handles every endpoint the game expects:
 // ANY *                                → catch-all 200 empty (never 404, game chokes on 404s)
 ```
 
-The catalog patching is the slick part. The original `catalog.json` has URLs pointing to `resource.hyperheroes.net`. When the game requests it, the server intercepts and rewrites every URL on the fly to `http://<PUBLIC_HOST>:3000/...`. No need to touch the APK's copy (though `build.ps1` does that too as a fallback).
+The catalog patching is the slick part. The original `catalog.json` has URLs pointing to `resource.hyperheroes.net`. When the game requests it, the server intercepts and rewrites every URL on the fly to `http://<PUBLIC_HOST>:3000/...`. No need to touch the APK's copy (though I have a recompiled and signed .apk that I changed the IPs manually, you will see just scrolling down a little).
 
 ---
 
@@ -391,8 +456,8 @@ Handles varint32 framing (`value = segmentLength + 1`), `0x00` terminators, and 
 ```javascript
 // DES-CBC — ancient, insecure, don't care. It's what the game uses.
 // Node.js v17+ blocks DES by default → --openssl-legacy-provider
-const key = Buffer.from('7e9ac962', 'utf8');  // 8 bytes
-const iv  = Buffer.from('01c20de0', 'utf8');  // 8 bytes
+const key = CENSORED ALREADY; // 8 bytes
+const iv  = ALSO CENSORED ALREADY; // 8 bytes
 ```
 
 **Protobuf — done by hand.** No `.proto` files exist anywhere. Rebuilt the serialization manually:
@@ -448,12 +513,11 @@ const accountState = new Map();
 
 The game has hostnames hardcoded in two places. `catalog.json` / `settings.json` have the Addressables URLs in plain text — easy to patch. But `global-metadata.dat` has the bootstrap hostnames baked into the IL2CPP string table as binary data. That's the tricky one.
 
-`build.ps1` handles the whole pipeline.
 
 **Steps 1-2: patch the text files** (trivial string replace):
 
 ```
-http://resource.hyperheroes.net/Addressables/ServerData/P21/Android
+http://GAMESSERVERDOMAINNAMEBLABLABLA/Addressables/ServerData/P21/Android
 → http://192.168.0.5:3000/Addressables/ServerData/P21/Android
 ```
 
@@ -461,7 +525,7 @@ http://resource.hyperheroes.net/Addressables/ServerData/P21/Android
 
 Strings in `global-metadata.dat` have fixed length. Replace `serverlist.hyperheroes.net` (26 bytes) with `192.168.0.5` (11 bytes) and you corrupt the entire metadata file. The replacement MUST be byte-for-byte the same length.
 
-The trick: **sslip.io**. A DNS service that resolves any IP embedded in the hostname:
+The trick: **sslip.io**. A DNS service that resolves any IP embedded in the hostname (This one is cool right? U liked it huh? :D ):
 
 ```
 serverlist.hyperheroes.net  (26 bytes) → serve.192-168-0-5.sslip.io  (26 bytes)  ✓
@@ -481,7 +545,23 @@ apksigner sign --ks debug.keystore --ks-pass pass:android hyper-heroes-aligned.a
 
 v2 signature required for Android 7+ (API 24+). The original APK used v1+v2.
 
-There's also `build-cash.ps1` — a variant that keeps original CDN URLs for assets but redirects only the billing host (`39.107.237.64:8080 → 192.168.0.5:3001`). Useful when you want real CDN assets but fake billing.
+WITH ALL THIS DONE>>>>> SERVER STAAARTED>>>>
+
+<img width="913" height="560" alt="image" src="https://github.com/user-attachments/assets/5d8f05a7-f147-4b96-a018-97e0027ddf5c" />
+
+Opening the installed APK>>>>>
+
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/6516821c-5fbe-456e-bd6b-3fabf4fabe75" />
+
+Not found worked....
+
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/49b4c992-2a78-4fc9-a311-3e27fea90209" />
+
+Server is also on>>>
+
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/c027ac12-ea91-4f39-9c83-10685cc0cc30" />
+
+
 
 ---
 
@@ -549,31 +629,10 @@ SyncLottoTimeResponse {
 
 ## 13. The Cash Server
 
-The game's billing went through a separate server at `39.107.237.64:8080`. Dead now, obviously.
+The game's billing went through a separate server.... Dead now, obviously.
 
 `cash-server/server.js` — standalone Express server in permanent FORCE_SUCCESS mode. Never contacts upstream. Every request gets a fake success with maxed values:
 
-```javascript
-const MAX = 2147483647; // INT_MAX
-
-function makeFakeSuccess(pathname) {
-    const p = pathname.toLowerCase();
-
-    // Balance check? You're rich.
-    if (p.includes('balance') || p.includes('diamond')) {
-        return { code: 0, data: { balance: MAX, rmb: MAX, diamond: MAX } };
-    }
-
-    // Purchase? Done. Still rich.
-    if (p.includes('topup') || p.includes('purchase')) {
-        return { code: 0, data: { orderId: 'LOCAL_' + Date.now(), status: 1, rmb: MAX } };
-    }
-
-    // VIP? Level 10, no expiration.
-    // Any field named rmb/diamond/crystal/gem/coin/balance → INT_MAX
-    // ...
-}
-```
 
 Client-side Frida hooks complete the picture:
 
@@ -589,55 +648,9 @@ Port 3001. `node cash-server/server.js`. Done.
 
 ---
 
-## 14. The Bug Graveyard
+##GGs! I can play locally now!
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/94b065fa-951f-42d8-9b7f-4c1f963e35a8" />
 
-Each of these took hours to find and minutes to fix. Classic.
-
-**#1 — SIGSEGV: The Missing Third Segment**
-
-Server sends `[header, body]` → client dies instantly. Turns out NRpc ALWAYS sends 3 segments for responses: `[header, body, commonResponse]`. The third is an encrypted protobuf blob: `{1: {1:1, 2:0, 4:0}}`. Without it, deserialization reads past the segment array. Unmapped memory. SIGSEGV.
-
-Fix: `COMMON_RESPONSE_RAW` constant + `buildCommonResponseSeg()`. Every RPC response (except XDLogin, HeartBeat, Chat RPCs) now sends all three.
-
-**#2 — LevelEnd: "Index was out of range"**
-
-Complete level 300101, callback `b__0` crashes with `ArgumentOutOfRangeException`. The callback does `for i in GetDropItem: GetOwnedStuffInfo(i)`. Level 300101 drops `[{800010, ×2}, {800010, ×2}]` — two entries for the same item. I merged them into one inventory entry. Callback expected two.
-
-Rule: `count(StuffInfo[]) == count(LevelDropItem[])`. Always. One StuffInfo per drop line. Not per unique item. If two drops reference the same itemId, emit two StuffInfo entries pointing to the same stuffId.
-
-**#3 — GetMonthOperActivityDot: Wrong Field**
-
-Lobby crashes on load. Generic stub returns `pbFieldVarint(127, 0)`. Client expects `pbFieldVarint(1, 0)` — field 1, isHasActivity = false. Field 127 means nothing to the parser.
-
-One line fix. Separated from the stub group.
-
-**#4 — OnePieceEquipItem: Where Are My Items?**
-
-Tutorial freezes at equipment step. Inventory's empty. The quality-10 equip items aren't drops — they're supposed to be pre-seeded at account creation. Nobody told me.
-
-Fix: pre-seed the inventory with both starter heroes' equipment items on account creation.
-
-**#5 — Double Quality Promotion**
-
-Hero goes from quality 10 straight to 21, skipping 20. `OnePieceEquipItem` was doing an internal promotion (10→20), then `QualityUp` promoted again (20→21). They're separate RPCs. Separate responsibilities.
-
-Fix: strip promotion from `OnePieceEquipItem`. It only equips now. `QualityUp` owns all promotions.
-
-**#6 — Gacha NullReferenceException (Triple Kill)**
-
-Open gacha, client dies. Three things wrong simultaneously:
-
-1. `OpenLottoHmi` returned stub instead of hero pool
-2. `Lotto` returned bad StuffInfo without `ShowNewCard`
-3. `CommonUserData` missing `SyncLottoTimeResponse` → `m_lottoArray` = null
-
-All three had to be fixed together. `OpenLottoHmi` now returns 8 heroes. `Lotto` got rewritten with proper `ShowNewCard` + `OwnedCardInfo` + persistence. `CommonUserData` got the lotto config stuffed into `SyncConfigResponse`.
-
----
-
-## 15. What Works Now
-
-Full guest login. 35 Addressables + 126 AssetBundles served locally. Patched catalog with dynamic URL rewriting. 15+ HTTP bootstrap endpoints. Full NRpc protocol across Lobby, Game, and Chat. Complete tutorial from intro cutscene through battles, equipment, quality promotion, gacha. Equipment system. Quality promotion. Working gacha. Infinite diamonds and gold. Purchases without Google Play. Fake billing server. 25 passive Frida hooks. Automated build pipeline — patches, rebuilds, signs the APK in one script.
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -670,9 +683,7 @@ Full guest login. 35 Addressables + 126 AssetBundles served locally. Patched cat
 
 ## 16. What I Learned
 
-**Emulators are useless for IL2CPP hooking.** The houdini/ndk_translation layer doesn't just slow things down — it makes Frida's Interceptor corrupt memory. Real ARM64 silicon or nothing.
-
-**The third NRpc segment exists and it's mandatory.** Without the `commonResponse` blob, SIGSEGV. Didn't show up obviously in the PCAPs — looked like "just another few bytes." Hours of staring at hex dumps to figure out.
+**Emulators are useless for IL2CPP hooking.** The houdini/ndk_translation layer doesn't just slow things down — it makes Frida's Interceptor corrupt memory. Real ARM64 silicon or nothing. (Hard to learn)
 
 **Array counters must match exactly.** LevelEnd callback does `for i in dropItems: stuffInfos[i]`. Merged duplicate drops into fewer StuffInfo entries thinking I was being smart? Congrats — out-of-bounds crash. One StuffInfo per drop line. Always.
 
@@ -680,10 +691,12 @@ Full guest login. 35 Addressables + 126 AssetBundles served locally. Patched cat
 
 **The tutorial is an unforgiving server-side state machine.** Each `UpdateUserGuide` persists a bitmask. Get it wrong, tutorial loops or soft-locks. The server must track every guide completion exactly as the original did.
 
-**Document everything.** The 800+ line `README.md` and this write-up exist because past-me kept forgetting why things were done a certain way. Next NRpc method that needs implementing? Pattern's already here.
+**Document everything.** The 800+ line `phypershit.txt` and this write-up exist because past-me kept forgetting why things were done a certain way. Next NRpc method that needs implementing? Pattern's already here.
 
 **Mirror assets while you still can.** Game servers die first. CDNs (S3, CloudFront) survive longer — just static file hosting, nobody remembers to turn it off. That window closes eventually. Mirror early, mirror everything.
 
 ---
+
+Newton - Cybersecurity BLABALBALABALABAL AGAIN!
 
 *Phyper — March 2026*
