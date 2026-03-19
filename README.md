@@ -1,311 +1,268 @@
-# Write-Up: Reviving Hyper Heroes — From a Dead APK to a Fully Functional Local Server
+# Reviving a Dead Game: Hyper Heroes Private Server from Scratch
 
-> **Project:** Phyper — Full reverse engineering of the mobile game Hyper Heroes (Unity/IL2CPP)  
-> **Platform:** Android ARM64  
-> **Engine:** Unity 2018.3.5f1, IL2CPP backend  
-> **Status:** Full tutorial working — login, battle, equipment, promotion, gacha  
+> Hyper Heroes is dead. Yep! GMs Gone. Game fully abandoned.
+They even said it at their Reddit:::
 
----
+<img width="302" height="177" alt="image" src="https://github.com/user-attachments/assets/3cb4bef4-ac0e-493b-a92b-9e658e4c3800" />
 
-## Table of Contents
-
-1. [Context and Motivation](#1-context-and-motivation)
-2. [Phase 1 — APK Decompilation](#2-phase-1--apk-decompilation)
-3. [Phase 2 — Traffic Interception with Burp Suite](#3-phase-2--traffic-interception-with-burp-suite)
-4. [Phase 3 — Network Protocol Discovery](#4-phase-3--network-protocol-discovery)
-5. [Phase 4 — IL2CPP Dump and Static Analysis](#5-phase-4--il2cpp-dump-and-static-analysis)
-6. [Phase 5 — Frida and the Emulator Problem](#6-phase-5--frida-and-the-emulator-problem)
-7. [Phase 6 — Migration to a Physical Device (Motorola)](#7-phase-6--migration-to-a-physical-device-motorola)
-8. [Phase 7 — Frida Instrumentation (hhproxy.js)](#8-phase-7--frida-instrumentation-hhproxyjs)
-9. [Phase 8 — Resource Server](#9-phase-8--resource-server)
-10. [Phase 9 — NRpc Protocol Implementation](#10-phase-9--nrpc-protocol-implementation)
-11. [Phase 10 — APK Patching and Build Pipeline](#11-phase-10--apk-patching-and-build-pipeline)
-12. [Phase 11 — Making the Tutorial Work](#12-phase-11--making-the-tutorial-work)
-13. [Phase 12 — Cash Server (Billing)](#13-phase-12--cash-server-billing)
-14. [Phase 13 — Critical Bugs and How They Were Fixed](#14-phase-13--critical-bugs-and-how-they-were-fixed)
-15. [Final Result](#15-final-result)
-16. [Lessons Learned](#16-lessons-learned)
+> So I tore the APK apart, reversed the protocol, hooked the binary with Frida, 
+> and built a full replacement server from nothing but packet captures and a 600k-line C# dump.
+>
+> **Target:** Hyper Heroes v1.1.80 (Unity 2018.3.5f1 / IL2CPP / ARM64)
+> **Result:** Full tutorial playable — login, battles, equipment, gacha, everything.
 
 ---
 
-## 1. Context and Motivation
+## The Roadmap
 
-**Hyper Heroes** was a mobile action/RPG pinball-style game developed by Allstar Games (published by Hyperjoy). The game had its servers shut down, making it completely unplayable — upon opening the app, it simply wouldn't get past the login screen because it depended entirely on remote servers for absolutely everything: login, player data, assets, battle, chat, shop.
-
-The goal of this project was to **revive the game by creating a complete local server**, allowing it to be played offline/LAN without depending on any external infrastructure.
+1. [Why](#1-why)
+2. [Tearing the APK Apart](#2-tearing-the-apk-apart)
+3. [Sniffing the Wire](#3-sniffing-the-wire)
+4. [Cracking the Protocol](#4-cracking-the-protocol)
+5. [The IL2CPP Dump — Mapping the Game's Brain](#5-the-il2cpp-dump--mapping-the-games-brain)
+6. [The Emulator Problem](#6-the-emulator-problem-spoiler-it-doesnt-work)
+7. [Going Physical — Motorola One Vision](#7-going-physical--motorola-one-vision)
+8. [Frida Instrumentation — hhproxy.js](#8-frida-instrumentation--hhproxyjs)
+9. [Building the Resource Server](#9-building-the-resource-server)
+10. [Implementing the NRpc Protocol](#10-implementing-the-nrpc-protocol)
+11. [Patching the APK](#11-patching-the-apk)
+12. [Tutorial Hell](#12-tutorial-hell)
+13. [The Cash Server](#13-the-cash-server)
+14. [The Bug Graveyard](#14-the-bug-graveyard)
+15. [What Works Now](#15-what-works-now)
+16. [What I Learned](#16-what-i-learned)
 
 ---
 
-## 2. Phase 1 — APK Decompilation
+## 1. Why
 
-### Tools used
-- **apktool 3.0.1** — APK decompilation and recompilation
-- **IL2CppDumper** — C# class dump from the IL2CPP binary
+Hyper Heroes was a pinball-RPG thing by Allstar Games, later Republished by 90km then purchased by another Chinese company and by the end of this mess abandoned. The game hasn't received an updated since October 2022.
+So the plan was simple: reverse engineer the entire client-server communication and build a replacement server that makes the game think nothing changed. Locally without messing around with their servers, their data and avoiding getting a "warn" from the company.
 
-### Process
+DISCLAIMER:
+BEFORE DOING ALL THIS, I'VE REQUESTED PERMISSION, SENT EMAILS, TALKED TO PEOPLE AND MADE EVERYTHING OK SO WE COULDN'T TOUCH ANY SENSITIVE STUFF, BREAK ANYTHING GOING ON OR U KNOW THE DRILL....
 
-The first step was to obtain the original Hyper Heroes APK (version 1.1.80, build `1bbb10831.2208240940`) and decompile it with apktool:
+---
+
+## 2. Tearing the APK Apart
+
+First thing I did was apktooled this:
 
 ```powershell
 apktool d hyper-heroes.apk -o hyper-heroes-original
 ```
 
-This extracted:
-- `AndroidManifest.xml` — App configuration
-- `assets/` — Unity assets (AssetBundles, Addressables, binary data)
-  - `assets/aa/Android/` — Unity Addressables (catalog.json, settings.json, 35 .bundle)
-  - `assets/bin/Data/` — Unity binary data, including `global-metadata.dat`
-  - `assets/AtlasData/`, `assets/Font/`, `assets/UITexture/` — Textures and fonts
-- `lib/arm64-v8a/` — Native binaries, including **`libil2cpp.so`** (the IL2CPP-compiled ARM64 executable)
-- `smali/`, `smali_classes2/` — Decompiled Java/Kotlin code (SDK, wrappers)
-- `res/` — Android resources (layouts, strings, drawables)
+Out comes the guts:
 
-### Initial discovery: The game uses IL2CPP
+```
+hyper-heroes-original/
+├── AndroidManifest.xml
+├── assets/
+│   ├── aa/Android/          # Unity Addressables — catalog.json, settings.json, 35 .bundle files
+│   ├── bin/Data/             # global-metadata.dat lives here (IL2CPP string table)
+│   ├── AtlasData/            # sprite atlases
+│   └── Font/, UITexture/     # fonts, UI textures
+├── lib/arm64-v8a/
+│   └── libil2cpp.so          # <-- THE PRIZE. All game logic compiled to ARM64.
+├── smali/, smali_classes2/   # Java/Kotlin SDK wrappers (boring)
+└── res/                      # Android resources
+```
 
-Upon examining `lib/arm64-v8a/`, we found `libil2cpp.so` — which confirmed that all Unity C# code was compiled to native ARM64 code via IL2CPP. This meant we wouldn't have direct access to C# (as we would with Mono), but we could use IL2CppDumper to extract metadata.
+The moment I saw `libil2cpp.so` in `lib/arm64-v8a/`, I knew what we were dealing with. Unity IL2CPP — all the C# game code compiled down to native ARM64 machine code. No nice decompilable Mono DLLs for us. But there's a trick.
 
-### IL2CppDumper
-
-We ran IL2CppDumper with `libil2cpp.so` + `global-metadata.dat`:
+IL2CppDumper takes the binary + the metadata file and spits out the original class structure:
 
 ```
 Il2CppDumper.exe libil2cpp.so global-metadata.dat output/
 ```
 
-Result:
-- **`dump.cs`** — ~600,000 lines of C# class definitions with method names, fields, memory offsets, and RVAs (relative virtual addresses in the binary). This file became our "map" for all reverse engineering.
-- **`script.json`** — Decimal addresses for RVA conversion
-- **`il2cpp.h`** — C struct definitions
-- **`DummyDll/`** — Dummy DLLs for reference in tools like dnSpy
+And just like that, we got `dump.cs` — **600,000 lines** of C# class definitions. Every class, every method, every field, with their RVAs (addresses in the binary). This file became the map for everything that followed.
 
-The `dump.cs` revealed the entire game architecture: classes like `NRpcNetwork`, `NRpcParams`, `NContainerLobby`, `NManagerGame`, `PlayerInfo`, `OwnedCardInfo`, `LevelEndResponse`, etc.
+It immediately revealed the architecture: `NRpcNetwork` for TCP transport, `NRpcParams` with static Encrypt/Decrypt methods (hello encryption keys >>> not putting any here, it's on the apk released BTW not my fault), `PlayerInfo`, `OwnedCardInfo` with 55+ protobuf fields, `CommonUserDataResponse` with 51 fields... the entire game laid bare in type signatures.
 
+Other stuff checked was... The assetbundles did contained A LOT of rewards and prize data... Meaning that, the game basically ran locally and checked here and there with the Authoritative server to know if the X transaction was okay.
+
+<img width="1662" height="797" alt="image" src="https://github.com/user-attachments/assets/814c3eba-16c1-4d0b-8bdc-fe66c6a542b9" />
+
+Examples above xd.
 ---
 
-## 3. Phase 2 — Traffic Interception with Burp Suite
+## 3. Sniffing the Wire
 
-### Proxy setup
+To see what the game actually says over the network, I set up Burp Suite as an HTTP proxy:
 
-To understand the game's network behavior, we set up an HTTP proxy with Burp Suite:
-
-```
-adb shell settings put global http_proxy <HOST_MACHINE_IP>:8080
+```powershell
+adb shell settings put global http_proxy 192.168.0.5:8080
 ```
 
-Additional setup required:
-- Install the Burp CA certificate on the device (`.cer` format)
-- Enable TLSv1.1, TLSv1.2, and TLSv1.3 in Burp (the game used legacy ciphers)
-- Enable "Allow unsafe renegotiation" in Burp
-- Configure the proxy on "All interfaces" to accept device connections
+Had to install Burp's CA cert on the device, enable legacy TLS (the game used old ciphers), allow unsafe renegotiation — the usual dance with old mobile apps.
 
-### First captured requests
-
-Upon opening the game with the proxy configured, we captured the HTTP bootstrap sequence:
-
-1. **`GET /notice.txt`** → `notice-hczz-oversea.oss-us-east-1.aliyuncs.com` (Aliyun OSS)
-   - Game notice/announcement — returned empty (Content-Length: 0)
-
-2. **`GET /Addressables/ServerData/P21/Android/catalog_2022.08.24.06.02.11.hash`** → `resource.hyperheroes.net` (CloudFront/S3)
-   - Addressables catalog hash — the game checks whether it needs to update assets
-   - Response: `79a50b6a9a636b6a450312e471f6c2d6` (32 bytes, MD5)
-
-3. **`GET /Addressables/ServerData/P21/Android/catalog_2022.08.24.06.02.11.json`** → `resource.hyperheroes.net`
-   - Full Unity Addressables catalog — lists all `.bundle` files the game needs to download
-
-4. **`GET /serverlist/api/queryList`** → `serverlist.hyperheroes.net`
-   - **Critical endpoint**: returns the server list with `loginProxy` (game server TCP address), `resourceUrl`, `noticeUrl`, etc.
-
-5. **`GET /login/guest/guestlogin`** → Guest login
-6. **`GET /globalservice/account/accountList`** → XD SDK account listing
-7. **`GET /myip`** → `myip.hyperheroes.net:1053` — returns the client's IP address
-
-### Crucial discovery: AssetBundles + Resource server
-
-Analyzing the `catalog.json` inside the APK, we discovered that the game makes requests for **Unity Addressables** — asset bundles (audio, effects, UI, textures) hosted at:
+Fired up the game and caught the HTTP bootstrap sequence:
 
 ```
-http://resource.hyperheroes.net/Addressables/ServerData/P21/Android/<bundle>.bundle
+GET /notice.txt                                          → notice-hczz-oversea.oss-us-east-1.aliyuncs.com (empty)
+GET /Addressables/.../catalog_2022.08.24.06.02.11.hash   → resource.hyperheroes.net (MD5: 79a50b6a...)
+GET /Addressables/.../catalog_2022.08.24.06.02.11.json   → resource.hyperheroes.net (full asset catalog)
+GET /serverlist/api/queryList                             → serverlist.hyperheroes.net (THIS IS THE KEY)
+GET /login/guest/guestlogin                              → guest login
+GET /globalservice/account/accountList                   → XD SDK account list
+GET /myip                                                → myip.hyperheroes.net:1053
 ```
 
-The catalog listed **35 Addressable bundles**. Additionally, the game also downloaded **update AssetBundles** (126 `.assetbundle` files) from:
+The `queryList` response was gold — it told the client exactly where to connect: `loginProxy` (TCP address for the game server), `resourceUrl` (CDN for assets), `noticeUrl`, etc. Control this endpoint and you control where the game connects.
 
-```
-http://resource.hyperheroes.net/2021120801/600001/Android/<nome>.assetbundle
-```
+Inside the APK's `catalog.json`, I found the game downloads **35 Addressable bundles** from `http://resource.hyperheroes.net/Addressables/ServerData/P21/Android/` and **126 update AssetBundles** from a versioned path. The update manifest (`NBundleInfos.bytes`) was a dead-simple text format, same as I saw previously:
 
-The update list came from a manifest `NBundleInfos.bytes` — a simple text file with the format:
 ```
 -1@ElementName@FileName@MD5Hash@Extension@FileBytes
 ```
 
-**These assets were still online** on Amazon's S3/CloudFront even with the game servers dead — which gave us a window to mirror all of them before they were removed.
+I don't know why even though the game servers were dead they kept the CDN alive. Amazon S3/CloudFront doesn't care if the game studio stopped paying for game servers — the static assets stay up until someone explicitly removes them. I had a window to mirror everything before it disappeared YAYYY! (So I did it obviously... Game does it to the client, I just did it to my PC LoL).
 
-### What was NOT visible through the HTTP proxy
+But here's the thing — Burp only showed HTTP traffic. After `queryList`, the game opened raw TCP connections to ports 9150, 9151, 9152. That traffic? Invisible to Burp. That was the game's **NRpc protocol** — protobuf payloads wrapped in DES-CBC encryption... Saw a bunch of bytes here and there, hex code going up and down... but in my mind I was thinking (Is the game downloading anything yet? I didn't know they had this protocol going on early in this stage).
 
-Burp only captured HTTP traffic. After `queryList`, the game opened **direct TCP connections** (not HTTP) to ports like 9150, 9151, 9152. This TCP traffic was the game's proprietary **NRpc** protocol — protobuf + DES-CBC encryption. To analyze it, we needed a different approach.
+How could you know exactly the data? WIRESHARK THAT BITCH!
 
+<img width="1569" height="905" alt="image" src="https://github.com/user-attachments/assets/063b9dfb-9108-42cd-86f3-c59d787aa5e3" />
+
+Basically I've enforced my local server to be at 05 and my phone to be at 04. (NOTE THIS)
 ---
 
-## 4. Phase 3 — Network Protocol Discovery
+## 4. Cracking the Protocol
 
-### PCAP capture with Wireshark
-
-Since NRpc traffic didn't go through the HTTP proxy, we used Wireshark/tcpdump to capture all network traffic from the device:
+Switched to Wireshark for full packet capture:
 
 ```
 adb shell tcpdump -w /sdcard/capture.pcap
 ```
 
-The captured PCAPs (`Pcap1.pcapng`, `Pcap2.pcapng`) revealed the complete TCP communication.
+The PCAPs showed the raw TCP stream. Cross-referencing with `dump.cs`, the NRpc framing fell out:
 
-### NRpc protocol decoding
-
-Cross-referencing the PCAPs with `dump.cs`, we mapped the protocol:
-
-**Framing:**
 ```
-[varint32(len+1)] [segmento 0 — Header protobuf, plaintext]
-[varint32(len+1)] [segmento 1 — Body protobuf, DES-CBC criptografado]
-[varint32(len+1)] [segmento 2 — CommonResponse, DES-CBC criptografado]  (nas respostas)
-[0x00]            ← terminador de pacote
+[varint32(len+1)] [Segment 0: Header — protobuf, plaintext]
+[varint32(len+1)] [Segment 1: Body — protobuf, DES-CBC encrypted]
+[varint32(len+1)] [Segment 2: CommonResponse — DES-CBC encrypted]  ← responses only
+[0x00]            ← packet terminator
 ```
 
-- Each segment's length is encoded as varint32 with value = `actual_size + 1`
-- The `0x00` byte marks the end of the packet (since `0 + 1 = 1`, and zero-length segments don't exist)
+Each segment length is a varint32 encoding `actual_size + 1`. The `0x00` terminator works because a zero-length segment would encode as `1`, so `0` is unambiguous as "end of packet". Elegant.
 
-**Encryption:**
-- Algorithm: **DES-CBC**
-- Key: `7e9ac962` (8 bytes UTF-8)
-- IV: `01c20de0` (8 bytes UTF-8)
+The encryption? DES-CBC. Found the key and IV straight in `dump.cs` under `NRpcParams`:
 
-The key and IV were found in `dump.cs` (`NRpcParams` class) and confirmed via Frida hooks on `NRpcParams.Encrypt` / `NRpcParams.Decrypt`.
+```
+Key: 7e9ac962  (8 bytes UTF-8)
+IV:  01c20de0  (8 bytes UTF-8)
+```
 
-**Header protobuf (Segment 0 — plaintext):**
-- Field 1 (varint) = Error code (0 = success)
-- Field 2 (string) = RPC method name (e.g., "XDLogin", "HeartBeat", "CommonUserData")
-- Field 3 (string) = Request token (UUID to correlate request/response)
+Later confirmed these with Frida hooks on the actual Encrypt/Decrypt calls. They matched.
 
-**Body protobuf (Segment 1 — encrypted):**
-- Content specific to each RPC method
-- Protobuf fields mapped directly to classes from `dump.cs`
+The header (segment 0) is always plaintext protobuf:
 
-### Decoding tools created
+```
+field 1 (varint) = error code (0 = OK)
+field 2 (string) = RPC method name — "XDLogin", "HeartBeat", "CommonUserData", etc.
+field 3 (string) = request token (UUID, ties request to response)
+```
 
-To analyze the PCAPs, we created specialized Node.js scripts:
+The body (segment 1) is method-specific protobuf, encrypted. Every method's fields map directly to the classes in `dump.cs`.
 
-- **`decode_pcap.js`** — Basic NRpc segment decoder (generic protobuf + DES-CBC)
-- **`decode_pcap2.js`** — Decoder with full varint32 framing, parsed entire PCAPs
-- **`decode_pcap3.js`** — Decoder specific to the second PCAP capture
-- **`decode_lotto.js`** — Decoder focused on gacha system responses
+To decode the PCAPs, I wrote a series of Node.js scripts:
 
-These scripts allowed us to see exactly what the original server sent for each RPC — the "Rosetta Stone" for reimplementing every endpoint.
+```javascript
+// decode_pcap.js  — basic NRpc decoder, generic protobuf + DES-CBC
+// decode_pcap2.js — full varint32 framing parser, processes entire PCAP files
+// decode_pcap3.js — tuned for the second capture session
+// decode_lotto.js — focused on gacha response dissection
+```
+
+These became the Rosetta Stone. I could see exactly what the original server sent for every single RPC call. Every field, every value. This was the blueprint for the replacement server.
 
 ---
 
-## 5. Phase 4 — IL2CPP Dump and Static Analysis
+## 5. The IL2CPP Dump — Mapping the Game's Brain
 
-### Class and method mapping
+The 600k-line `dump.cs` was basically a decompiled class reference for the entire game. Here's what mattered:
 
-The `dump.cs` with ~600k lines was the foundation of all analysis. We extracted:
+```csharp
+// === Network layer ===
+// NRpcNetwork / NRpcNetworkEx — TCP transport + serialization
+// NRpcParams — DES-CBC (static Encrypt/Decrypt with hardcoded key/IV)
+// DelegatePushRPC — server-to-client push notifications
 
-**Network classes:**
-- `NRpcNetwork` / `NRpcNetworkEx` — TCP transport layer + serialization
-- `NRpcParams` — DES-CBC encryption (static Encrypt/Decrypt)
-- `DelegatePushRPC` — Push system (server → client)
+// === Data structures (all protobuf-serialized) ===
+// PlayerInfo — userId, nick, level, rmb (diamonds), gold
+// OwnedCardInfo — 55+ fields: actorId, quality, star, stats, equipped items
+// CommonUserDataResponse — 51 fields: the EVERYTHING response after login
+// LevelEndResponse — battle result, drops, XP, updated cards
+// LottoResponse / OpenLottoHmiResponse — gacha system
 
-**Data classes (protobuf):**
-- `PlayerInfo` — Player data (userId, nick, level, rmb/diamonds, gold)
-- `OwnedCardInfo` — Hero data (55+ protobuf fields: actorId, quality, stats, equipment)
-- `CommonUserDataResponse` — Mega-response post-login (51 fields: config, inventory, heroes, levels, tasks...)
-- `LevelEndResponse` — Response upon completing a level (result, drops, XP, updated cards)
-- `LottoResponse` / `OpenLottoHmiResponse` — Gacha system
+// === Gameplay lifecycle ===
+// NContainerLobby — Awake → Start → InitFunctionMap (lobby boot sequence)
+// UIGuide — Open(introId) / Close / CloseAndCompleteIntro (tutorial state machine)
+// NManagerGame — global singleton, holds playerInfo, SubPlayerRmb (spend diamonds)
+// NManagerChannel — billing layer: Pay, PayOver, IsGuest
+```
 
-**Gameplay classes:**
-- `NContainerLobby` — Lobby lifecycle (Awake → Start → InitFunctionMap)
-- `UIGuide` — Tutorial system (Open/Close/CloseAndCompleteIntro)
-- `NManagerGame` — Global manager (playerInfo, SubPlayerRmb, etc.)
-- `NManagerChannel` — Billing layer (Pay, PayOver, IsGuest)
+Every method in the dump had its RVA — the address in `libil2cpp.so` where that method lives. These became Frida hook targets:
 
-### RVA mapping (binary addresses)
+```
+NRpcParams.Encrypt              → 0x26CBA54
+NRpcParams.Decrypt              → 0x26CBC5C
+NRpcNetworkEx.RequestRpc        → 0x210AE98
+NRpcNetworkEx.OnPackedReceived  → 0x210C354
+NContainerLobby.Awake           → 0x21830CC
+UIGuide.Open                    → 0x298D510
+NDebug.LogError                 → 0x237A4AC
+```
 
-Each method in `dump.cs` had a commented offset. We converted these offsets to RVAs (Relative Virtual Addresses) that could be used as Frida hook points:
+I also ran Ghidra with IL2CppDumper's scripts (`ghidra.py`, `ghidra_with_struct.py`) to import the type definitions and do static analysis on the binary. This revealed the IL2CPP object memory layout:
 
-| Method | RVA |
-|---|---|
-| `NRpcParams.Encrypt` | `0x26CBA54` |
-| `NRpcParams.Decrypt` | `0x26CBC5C` |
-| `NRpcNetworkEx.RequestRpc` | `0x210AE98` |
-| `NRpcNetworkEx.OnPackedReceived` | `0x210C354` |
-| `NContainerLobby.Awake` | `0x21830CC` |
-| `UIGuide.Open` | `0x298D510` |
-| `NDebug.LogError` | `0x237A4AC` |
-
-### Ghidra analysis
-
-Alongside the dump, we used Ghidra scripts (`ghidra.py`, `ghidra_with_struct.py`, `ghidra_wasm.py`) from IL2CppDumper to import type definitions and facilitate static analysis of `libil2cpp.so`. This helped understand the memory layout of IL2CPP objects:
-
-- `Il2CppString`: klass(8) + monitor(8) + length(i32@0x10) + chars(utf16@0x14)
-- `Il2CppArray`: klass(8) + monitor(8) + bounds(ptr@0x10) + max_length(i32@0x18) + data(@0x20)
-- `List<T>`: klass(8) + monitor(8) + _items(ptr@0x10) + _size(i32@0x18)
+```c
+// Il2CppString: klass(8) + monitor(8) + length(i32@0x10) + chars(utf16@0x14)
+// Il2CppArray:  klass(8) + monitor(8) + bounds(ptr@0x10) + max_length(i32@0x18) + data(@0x20)
+// List<T>:      klass(8) + monitor(8) + _items(ptr@0x10) + _size(i32@0x18)
+```
 
 ---
 
-## 6. Phase 5 — Frida and the Emulator Problem
+## 6. The Emulator Problem (Spoiler: It Doesn't Work)
 
-### Initial attempt with emulator
+First attempt: hook `libil2cpp.so` on an x86_64 Android emulator (BlueStacks, Android Studio AVD). Seemed reasonable — run the game, attach Frida, read traffic.
 
-The first instrumentation attempt was on an **x86_64 Android emulator** (BlueStacks / Android Studio AVD). The idea was to use Frida to hook `libil2cpp.so` and observe NRpc traffic in real time.
-
-### The problem: SIGSEGV on the emulator
-
-**x86_64 emulators with ARM translation (houdini/ndk_translation) DO NOT support IL2CPP hooks.** When attempting to attach Frida to any address in `libil2cpp.so`, the process crashed immediately with:
+Tried it. Instant crash:
 
 ```
 SIGSEGV (Bad access due to invalid address)
 ```
 
-The reason: `libil2cpp.so` is natively compiled for **ARM64** (`arm64-v8a`). On x86_64 emulators, it runs inside a binary translation layer (houdini) that maps ARM → x86 instructions. Frida's Interceptor works by rewriting instructions at the memory address of the hooked method — but when the code is being translated in real time by houdini, memory addresses don't correspond to the expected layout, and the rewrite corrupts the execution flow.
+Every. Single. Time.
 
-**Attempts that failed:**
-- Hook on `libil2cpp.so` → SIGSEGV
-- Using `Module.findExportByName` → IL2CPP exports aren't standard ELF exports
-- Hooking at the Java layer → doesn't give access to the NRpc protocol (which is native)
-- Android Studio AVD with ARM64 image → extremely slow and unstable
+Here's why: `libil2cpp.so` is compiled for ARM64. On an x86_64 emulator, it runs through **houdini** (Intel's ARM-to-x86 binary translation layer). Frida's Interceptor works by rewriting instructions at the target address — but houdini is translating those instructions on the fly. The memory layout isn't what Frida expects. The rewrite corrupts the translated instruction stream and the process dies.
 
-### Conclusion
+I tried everything. Direct hook on `libil2cpp.so` — SIGSEGV. `Module.findExportByName` — IL2CPP doesn't use standard ELF exports. Java-layer hooks — can't reach NRpc, it's all native. ARM64 system image on AVD — painfully slow, still unstable.
 
-There was no workaround: **we needed a real ARM64 device**.
+Dead end. No workaround exists. If you want to hook IL2CPP, you need real ARM64 hardware. Period.
 
 ---
 
-## 7. Phase 6 — Migration to a Physical Device (Motorola)
+## 7. Going Physical — Motorola One Vision
 
-### Hardware
+Pulled out a **Motorola One Vision** (ARM64, Android 9). Native ARM64 — no translation layer, no houdini nonsense.
 
-We migrated to a **Motorola One Vision** (ARM64, Android 9+) — a native ARM64 device where `libil2cpp.so` runs without translation.
+Set up Frida:
 
-### Setting up Frida on the real device
-
-1. **frida-server** (ARM64, version 17.8.2) was transferred to the device:
 ```powershell
 adb push fridaserver/frida-server-17.8.2-android-arm64/frida-server /data/local/tmp/
 adb shell chmod 755 /data/local/tmp/frida-server
 adb shell su -c "/data/local/tmp/frida-server &"
 ```
 
-2. **frida-tools** no PC:
 ```powershell
 pip install frida-tools==17.8.2
+frida -U -l  # verify — lists device processes
 ```
 
-3. **Connectivity test:**
-```powershell
-frida -U -l  # lists processes on the device
-```
-
-### First successful hook
-
-With the real device, the first hook on `NRpcParams.Encrypt` (RVA `0x26CBA54`) worked perfectly:
+First hook on the real device — `NRpcParams.Encrypt` at RVA `0x26CBA54`:
 
 ```javascript
 Interceptor.attach(base.add(0x26CBA54), {
@@ -316,175 +273,129 @@ Interceptor.attach(base.add(0x26CBA54), {
 });
 ```
 
-For the first time, we could see decrypted NRpc traffic in real time — the protocol's "black box" was opened.
+Worked. First try. Clean attach, no crash, plaintext NRpc data streaming across the console. The black box was open.
 
-### LAN networking
-
-With a physical device, communication now went through local WiFi:
-- PC (server): `192.168.0.5`
-- Motorola (client): `192.168.0.X` (DHCP)
-
-This added the need to configure `PUBLIC_HOST` on the server and adjust the build scripts to use the LAN IP instead of `10.0.2.2` (host alias on the emulator).
+With a physical device on WiFi, the network setup changed. PC (server) at `192.168.0.5`, Motorola at `192.168.0.X` via DHCP. Had to set `PUBLIC_HOST` on the server and update build scripts to use the LAN IP instead of `10.0.2.2` (the emulator's host alias). Small price for actually working hooks.
 
 ---
 
-## 8. Phase 7 — Frida Instrumentation (hhproxy.js)
+## 8. Frida Instrumentation — hhproxy.js
 
-### Script evolution
+The instrumentation script went through three generations.
 
-The instrumentation script went through several iterations:
+`hhproxy_aggressive.js` — first attempt. Hooked everything: libc, Java, IL2CPP, Unity engine internals. Caused random crashes and instability. Learned the hard way that less is more.
 
-1. **`hhproxy_aggressive.js`** — Initial aggressive version with many hooks, including libc and Java hooks. Caused instability.
+`hhproxy_full.js` — intermediate. Narrowed down to game-relevant targets, still too many hooks.
 
-2. **`hhproxy_full.js`** — Intermediate version with extensive hooks.
+`hhproxy.js` — the final version. **21 hooks + 4 diagnostic**, all purely passive (read-only). No libc hooks. No Java replacements. No Unity engine hooks. Just silent observation.
 
-3. **`hhproxy.js`** — **Final version: 21 hooks + 4 diagnostic**, purely passive (read-only). No libc hooks, no Java replacements, no Unity engine hooks. Observation only.
+Here's what it watches:
 
-### Implemented hook categories
+```
+Game logger      NDebug.LogError (throttled + deduplicated, no spam)
+Requests         RequestRpc + RequestRpc(List) — method name + token
+Crypto           NRpcParams.Encrypt/Decrypt — plaintext pre-encrypt, post-decrypt
+Responses        OnPackedReceived — header parse + segment count
+Callbacks        ResponseCallback — which handler gets which response
+Push             DelegatePushRPC.Invoke + InitPushCallBack
+Connection       SendConnect + OnLog
+HeartBeat        throttled: logs #1, #2, then 1 every 30
+Tutorial         UIGuide.Open/Close/CloseAndCompleteIntro — every step, every introId
+Lobby lifecycle  NContainerLobby.Awake/Start/InitFunctionMap
+Billing          IsGuest (forced false) + PayOver (forced success)
+Java HTTP        URL.openConnection — every URL the game touches
+LevelEnd debug   4 hooks on the b__0 callback for crash diagnosis
+```
 
-| Category | Hooks | Description |
-|---|---|---|
-| Game logger | 1 | `NDebug.LogError` — throttled + deduplicated (avoids spam) |
-| Request (send) | 2 | `RequestRpc` + `RequestRpc(List)` — captures method name + token |
-| Encrypt/Decrypt | 2 | `NRpcParams.Encrypt/Decrypt` — plaintext payload pre/post-encryption |
-| Response (recv) | 1 | `OnPackedReceived` — header parse + segment count |
-| Callback | 1 | `ResponseCallback` — log of dispatch to registered callback |
-| Push | 2 | `DelegatePushRPC.Invoke` + `InitPushCallBack` |
-| Connection | 2 | `SendConnect` + `OnLog` |
-| HeartBeat | 1 | Throttled: logs #1, #2, then 1 every 30 |
-| Tutorial | 3 | `UIGuide.Open/Close/CloseAndCompleteIntro` — tracks each tutorial step |
-| Lobby lifecycle | 3 | `NContainerLobby.Awake/Start/InitFunctionMap` |
-| Billing | 2 | `IsGuest` (forced false) + `PayOver` (forced success) |
-| Java HTTP | 1 | `URL.openConnection` — captures all HTTP URLs the game accesses |
-| LevelEnd diagnostics | 4 | Specific hooks to debug the LevelEnd `b__0` callback |
-
-### How Frida helped us
-
-Frida was essential in all subsequent phases:
-
-- **NRpc traffic capture** in plaintext (pre-encrypt / post-decrypt)
-- **Tutorial tracking** — each tutorial step (UIGuide introId) was logged, allowing us to replicate the exact sequence
-- **Crash debugging** — the 4 diagnostic hooks on LevelEnd showed us exactly which field/index caused `ArgumentOutOfRangeException`
-- **Lifecycle understanding** — seeing the exact order: `Awake → Start → InitFunctionMap → [RPCs] → UIGuide.Open(introId=2) → ...`
-
-### Execution
+This was the single most valuable tool in the entire project. Decrypted NRpc in real time. Logged every tutorial step by introId so I could replicate the exact sequence. Showed which field/index caused `ArgumentOutOfRangeException` in LevelEnd callbacks. Revealed the exact lifecycle order: `Awake → Start → InitFunctionMap → [RPCs] → UIGuide.Open(introId=2) → ...`
 
 ```powershell
-# Launch the game with instrumentation
 frida -U -f com.nkm.kp.hh -l MOD/hhproxy.js
-
-# With log to file
-frida -U -f com.nkm.kp.hh -l MOD/hhproxy.js > execution.log
+frida -U -f com.nkm.kp.hh -l MOD/hhproxy.js > execution.log  # persist everything
 ```
 
 ---
 
-## 9. Phase 8 — Resource Server
+## 9. Building the Resource Server
 
-### Motivation
+With the original servers dead, the game can't do anything. Can't download the Addressables catalog. Can't fetch asset bundles. Can't complete the HTTP bootstrap. Can't establish NRpc sessions. Total brick.
 
-With the original servers dead, the game couldn't:
-1. Download the Addressables catalog
-2. Download asset bundles (textures, audio, effects)
-3. Complete the HTTP bootstrap (queryList, login, myip)
-4. Establish NRpc session (lobby, game, chat)
+So I built a unified Node.js server (`resource-server/server.js`) that replaces everything. One process, 6+ ports:
 
-### Server architecture
+```
+Port 3000               HTTP    Main — assets, catalogs, HTTP bootstrap
+Ports 80/9050/1888/1053  HTTP    Auxiliary bootstrap (replicating original host ports)
+Port 9150               TCP     NRpc Lobby — login, player data, battles
+Port 9151               TCP     NRpc Game — real-time battle zone
+Port 9152               TCP     NRpc Chat
+```
 
-We created a unified Node.js server (`resource-server/server.js`) that responds on **6+ ports** simultaneously:
+**First priority: mirror the assets before the CDN dies.**
 
-| Port | Protocol | Function |
-|---|---|---|
-| 3000 | HTTP | Main — assets, catalogs, bootstrap |
-| 80, 9050, 1888, 1053 | HTTP | Auxiliary bootstrap (replicating original hosts) |
-| 9150 | TCP NRpc | Lobby — login, data, battle |
-| 9151 | TCP NRpc | Game zone — real-time battle |
-| 9152 | TCP NRpc | Chat |
-
-### Asset mirroring
-
-First of all, we took advantage of the CDNs still being online to mirror all assets:
-
-**Addressables (35 bundles):**
 ```powershell
 cd resource-server
-node download-assets.js
+node download-assets.js    # reads catalog.json, downloads all 35 Addressable bundles
+node sync-updates.js       # downloads NBundleInfos manifest, fetches 126 update AssetBundles (8 parallel workers)
 ```
 
-The `download-assets.js` script reads `catalog.json` from the APK, extracts all bundle URLs, and downloads them to `mirror/Addressables/ServerData/P21/Android/`.
+Everything saved to `mirror/`. CDN goes down tomorrow? Don't care.
 
-**Update AssetBundles (126 files):**
-```powershell
-node sync-updates.js
+The HTTP side handles every endpoint the game expects:
+
+```javascript
+// /notice.txt                          → empty (no announcements)
+// /activities*.html                    → local notice page
+// /serverlist/api/queryList            → THE KEY: redirect loginProxy + resourceUrl to our server
+// /serverlist/api/checkServerStatus    → always online
+// /login/guest/guestlogin              → code=0&ext=<MD5> (guest account)
+// /globalservice/account/accountList   → XD SDK account listing
+// /myip                                → client's IP
+// /login/check/getExt                  → SHA-256 hash
+// /Addressables/.../*.json             → patched catalog (URLs rewritten to point at us)
+// /Addressables/.../*.hash             → static hash (forces catalog refresh)
+// /Addressables/.../*.bundle           → serves 35 mirrored bundles
+// /<ver>/<ch>/Android/*.assetbundle    → serves 126 update bundles
+// /<ver>/<ch>/Android/*.bytes          → update manifest
+// ANY *                                → catch-all 200 empty (never 404, game chokes on 404s)
 ```
 
-The `sync-updates.js` script:
-1. Downloads `NBundleInfos.bytes` from the CDN
-2. Parses the manifest (text format with `@`-separated fields)
-3. Does parallel download (8 workers) of all `.assetbundle` files
-
-### Implemented HTTP endpoints
-
-| Endpoint | Function |
-|---|---|
-| `/notice.txt` | Empty notice |
-| `/activities*.html` | Local notice HTML page |
-| `/serverlist/api/queryList` | Server list — points `loginProxy` and `resourceUrl` to localhost |
-| `/serverlist/api/checkServerStatus` | Always online |
-| `/login/guest/guestlogin` | Guest login → `code=0&ext=<MD5>` |
-| `/globalservice/account/accountList` | Account list XD SDK |
-| `/myip` | Client IP |
-| `/login/check/getExt` | SHA-256 hash |
-| `/Addressables/.../catalog*.json` | Patched catalog (dynamic URLs to local host) |
-| `/Addressables/.../catalog*.hash` | Static hash (forces catalog refresh) |
-| `/Addressables/.../*.bundle` | Serves the 35 bundles from mirror |
-| `/<ver>/<ch>/Android/*.assetbundle` | Serves the 126 update AssetBundles |
-| `/<ver>/<ch>/Android/*.bytes` | Update manifest (`NBundleInfos.bytes`) |
-| `ANY *` | Catch-all → empty 200 (avoids blocking 404) |
-
-### Dynamic catalog patching
-
-The original `catalog.json` contained URLs pointing to `resource.hyperheroes.net`. The server intercepts catalog requests and rewrites all URLs dynamically to `http://<PUBLIC_HOST>:3000/...`, without needing to modify the file in the APK (although `build.ps1` also does this as a fallback).
+The catalog patching is the slick part. The original `catalog.json` has URLs pointing to `resource.hyperheroes.net`. When the game requests it, the server intercepts and rewrites every URL on the fly to `http://<PUBLIC_HOST>:3000/...`. No need to touch the APK's copy (though `build.ps1` does that too as a fallback).
 
 ---
 
-## 10. Phase 9 — NRpc Protocol Implementation
+## 10. Implementing the NRpc Protocol
 
-### The codec (nrpc-codec.js)
+The core of the whole project. Had to reimplement the game's proprietary binary protocol from scratch.
 
-We created a framing module for the NRpc protocol:
+**The codec** (`nrpc-codec.js`):
 
 ```javascript
 const { encodePacket, NRpcStreamDecoder } = require('./nrpc-codec');
 
-// Montar e enviar um pacote com 3 segmentos
+// Build and send a 3-segment response
 const packet = encodePacket([headerBuf, bodyBuf, commonResponseBuf]);
 socket.write(packet);
 
-// Decodificar stream incremental (chunks parciais OK)
+// Incremental stream decoder (handles TCP fragmentation gracefully)
 const decoder = new NRpcStreamDecoder();
 socket.on('data', (chunk) => {
     const packets = decoder.push(chunk);
-    for (const segments of packets) { /* processar */ }
+    for (const segments of packets) { /* process */ }
 });
 ```
 
-The codec handles:
-- Varint32 framing (value = `segmentLength + 1`)
-- `0x00` terminator
-- Incremental stream (TCP can fragment packets)
+Handles varint32 framing (`value = segmentLength + 1`), `0x00` terminators, and TCP stream reassembly (chunks can split mid-varint, mid-segment, anywhere).
 
-### DES-CBC Encryption
+**Encryption:**
 
-Each request/response body is encrypted with DES-CBC:
-- **Key:** `7e9ac962` (8 bytes)
-- **IV:** `01c20de0` (8 bytes)
+```javascript
+// DES-CBC — ancient, insecure, don't care. It's what the game uses.
+// Node.js v17+ blocks DES by default → --openssl-legacy-provider
+const key = Buffer.from('7e9ac962', 'utf8');  // 8 bytes
+const iv  = Buffer.from('01c20de0', 'utf8');  // 8 bytes
+```
 
-Note: Node.js v17+ blocks DES as it's considered insecure. We used the `--openssl-legacy-provider` flag to work around it.
-
-### Manual protobuf
-
-Since we didn't have the original `.proto` files, we reimplemented protobuf serialization manually with helper functions:
+**Protobuf — done by hand.** No `.proto` files exist anywhere. Rebuilt the serialization manually:
 
 ```javascript
 function pbFieldVarint(fieldNum, value) { /* ... */ }
@@ -492,119 +403,93 @@ function pbFieldBytes(fieldNum, buf) { /* ... */ }
 function pbFieldString(fieldNum, str) { /* ... */ }
 ```
 
-Each RPC method had its fields mapped from:
-1. The `dump.cs` (field names and types)
-2. Decoded PCAPs (real values from the original server)
-3. Frida hooks (decrypted traffic in real time)
+Every field was mapped by triangulating three sources: field names from `dump.cs`, actual values from decoded PCAPs, and live decrypted traffic from Frida hooks. Tedious but it works.
 
-### Implemented NRpc methods
+**Implemented methods** (grew organically — each one added when the tutorial hit it):
 
-The implementation grew organically as we progressed through the tutorial:
+```
+XDLogin                — PlayerInfo + token + zone addresses + UserGuide (the big one)
+HeartBeat              — header-only ACK, no body
+CommonUserData         — 51-field mega-response: config, heroes, inventory, levels, chat, lotto
+LevelData              — empty for new players
+StartLevel             — CardInfo + OwnedCardInfo + SyncHeart
+LevelEnd               — compound RPC: result + drops + XP + inventory + MapData (3 segments)
+UpdateUserGuide        — persists the tutorial bitmask
+UpdatePlayerTeam       — saves team composition
+PlayerTeam             — returns saved team
+LoginChat              — canLogin=true
+OnePieceEquipItem      — equip 6 item slots + consume from inventory
+QualityUp              — promote hero quality (10→20→21→30...)
+OpenLottoHmi           — gacha pool: 8 heroes + LottoRank
+Lotto                  — ShowNewCard + OwnedCardInfo + hero persistence
+GetMonthOperActivityDot — activity indicator (field 1 = false, NOT field 127)
+PlayerActorListOwnedCardAfter — full updated card list
++18 stubs              — header OK + minimal body (enough to not crash)
+```
 
-| Method | Type | Description |
-|---|---|---|
-| `XDLogin` | Login | PlayerInfo + Token + zone addresses + UserGuide |
-| `HeartBeat` | Keepalive | Header-only ACK (no body) |
-| `CommonUserData` | Mega-response | Config + heroes + inventory + levels + chat + lotto config |
-| `LevelData` | Query | Level data (empty for new player) |
-| `StartLevel` | Battle | CardInfo (ranking) + OwnedCardInfo + SyncHeart |
-| `LevelEnd` | Battle | Compound RPC: result + drops + XP + inventory + MapData |
-| `UpdateUserGuide` | Tutorial | Persists tutorial bitmask |
-| `UpdatePlayerTeam` | Lobby | Saves team composition |
-| `PlayerTeam` | Lobby | Returns saved team |
-| `LoginChat` | Chat | `canLogin=true` |
-| `OnePieceEquipItem` | Equipment | Equips 6 slots + consumes inventory |
-| `QualityUp` | Promotion | Promotes quality (10→20→21→30→...) |
-| `OpenLottoHmi` | Gacha | Pool of 8 heroes + LottoRank |
-| `Lotto` | Gacha | ShowNewCard + OwnedCardInfo + hero persistence |
-| `GetMonthOperActivityDot` | UI | Activity indicator |
-| `PlayerActorListOwnedCardAfter` | Cards | Complete list of updated cards |
-| +18 stubs | Various | Header OK + minimal body |
-
-### Per-account state (in memory)
-
-The server maintains state per guest account (UUID):
+Server-side state, in-memory per guest account (no database, no persistence needed):
 
 ```javascript
 const accountState = new Map();
-// Each account has:
-// - ownedCards: Map<cardId, { actorId, quality, star, equippedSlots, stats }>
-// - inventory: Map<itemId, { stuffId, count }>
-// - userGuide: tutorial bitmask
-// - team: array of cardIds
-// - nextCardId, nextStuffId: auto-increment counters
+// Per UUID:
+// {
+//   ownedCards:  Map<cardId, { actorId, quality, star, equippedSlots, stats }>,
+//   inventory:   Map<itemId, { stuffId, count }>,
+//   userGuide:   bitmask (tutorial progress),
+//   team:        [cardId, cardId],
+//   nextCardId:  auto-increment,
+//   nextStuffId: auto-increment
+// }
 ```
 
 ---
 
-## 11. Phase 10 — APK Patching and Build Pipeline
+## 11. Patching the APK
 
-### The problem: host redirection
+The game has hostnames hardcoded in two places. `catalog.json` / `settings.json` have the Addressables URLs in plain text — easy to patch. But `global-metadata.dat` has the bootstrap hostnames baked into the IL2CPP string table as binary data. That's the tricky one.
 
-The game had hardcoded hostnames in two places:
-1. **`catalog.json` / `settings.json`** — Addressables URLs (plain text)
-2. **`global-metadata.dat`** — Bootstrap hostnames (binary strings)
+`build.ps1` handles the whole pipeline.
 
-### build.ps1 — Patch + build + sign pipeline
+**Steps 1-2: patch the text files** (trivial string replace):
 
-The `build.ps1` automates the entire process:
-
-**Steps 1-2: Patch settings.json and catalog.json**
 ```
 http://resource.hyperheroes.net/Addressables/ServerData/P21/Android
 → http://192.168.0.5:3000/Addressables/ServerData/P21/Android
 ```
 
-**Step 3: Patch global-metadata.dat**
+**Step 3: patch `global-metadata.dat`** (the hard part):
 
-The challenge: strings in `global-metadata.dat` are stored with fixed length. If we replace `serverlist.hyperheroes.net` (26 bytes) with `192.168.0.5` (11 bytes), we corrupt the binary.
+Strings in `global-metadata.dat` have fixed length. Replace `serverlist.hyperheroes.net` (26 bytes) with `192.168.0.5` (11 bytes) and you corrupt the entire metadata file. The replacement MUST be byte-for-byte the same length.
 
-**Solution: sslip.io** — A service that resolves any IP embedded in the hostname:
+The trick: **sslip.io**. A DNS service that resolves any IP embedded in the hostname:
 
 ```
-serverlist.hyperheroes.net  (26 bytes)  →  serve.192-168-0-5.sslip.io  (26 bytes)
-server-kp.hyperheroes.net   (25 bytes)  →  serv.192-168-0-5.sslip.io   (25 bytes)
-myip.hyperheroes.net        (20 bytes)  →  192-168-0-5.sslip.io        (20 bytes)
+serverlist.hyperheroes.net  (26 bytes) → serve.192-168-0-5.sslip.io  (26 bytes)  ✓
+server-kp.hyperheroes.net   (25 bytes) → serv.192-168-0-5.sslip.io   (25 bytes)  ✓
+myip.hyperheroes.net        (20 bytes) → 192-168-0-5.sslip.io        (20 bytes)  ✓
 ```
 
-The `New-FixedLengthRedirectHost` function generates prefixes with the exact required length.
+`New-FixedLengthRedirectHost` generates a prefix padded to exactly the right byte count. `Replace-ByteSequence` does byte-by-byte binary search and swap in the metadata file.
 
-The `Replace-ByteSequence` function does byte-by-byte binary search and replaces while maintaining the same offset and size.
+**Steps 4-6: rebuild, align, sign:**
 
-**Step 4: Rebuild with apktool**
 ```powershell
 apktool b hyper-heroes-original -o hyper-heroes-patched.apk
-```
-
-**Step 5: Zipalign**
-```powershell
 zipalign -f 4 hyper-heroes-patched.apk hyper-heroes-aligned.apk
-```
-
-**Step 6: v2 Signing**
-```powershell
 apksigner sign --ks debug.keystore --ks-pass pass:android hyper-heroes-aligned.apk
 ```
 
-The v2 signature is required for Android 7+ (API 24+). The original APK used v1+v2.
+v2 signature required for Android 7+ (API 24+). The original APK used v1+v2.
 
-### build-cash.ps1 — Alternative build (billing only)
-
-A variant that keeps `settings.json` and `catalog.json` original (pointing to the real CDN) and only patches the billing host:
-
-```
-http://39.107.237.64:8080  →  http://192.168.0.5:3001
-```
-
-This allows using the original CDN for assets while redirecting purchases to the local cash-server.
+There's also `build-cash.ps1` — a variant that keeps original CDN URLs for assets but redirects only the billing host (`39.107.237.64:8080 → 192.168.0.5:3001`). Useful when you want real CDN assets but fake billing.
 
 ---
 
-## 12. Phase 11 — Making the Tutorial Work
+## 12. Tutorial Hell
 
-The Hyper Heroes tutorial is a rigid and strictly server-orchestrated sequence. Each step depends on the previous one. The implementation required faithfully reproducing the same sequence that the original server would send.
+The Hyper Heroes tutorial is a nightmare. Rigid, strictly server-orchestrated state machine. Every step depends on the previous one. Server sends wrong data at any point? Client freezes, crashes, or loops forever.
 
-### Complete tutorial flow (captured via Frida)
+The full sequence I mapped through Frida (every line was pain):
 
 ```
  1. HTTP bootstrap: queryList → guestlogin → accountList → checkServerStatus → myip
@@ -613,12 +498,12 @@ The Hyper Heroes tutorial is a rigid and strictly server-orchestrated sequence. 
  4. Lobby RPCs: OpenTreasurePage, GetFriends, GetBlackList, SyncRankingAward,
     LevelData×2, SyncEvent, SyncOperActivity, GetPlayerEvent (stubs OK)
  5. Continuous HeartBeats (Lobby 9150 + Chat 9152)
- 6. Tutorial guides: introId 4899→4913 (intro sequence)
+ 6. Tutorial guides: introId 4899→4913 (intro cutscene)
  7. Lobby init: Awake → Start → InitFunctionMap
  8. GetMonthOperActivityDot, GetCeremonyExchange, etc.
  9. UIGuide introId=2 → UpdateUserGuide → introId=3 → PlayerTeam → UpdatePlayerTeam
 10. LevelStart (levelId=300101) → Tutorial battle guides (1001→1012)
-11. LevelEnd (compound RPC, 3 segs) → drops + inventory + XP
+11. LevelEnd (compound RPC, 3 segments) → drops + inventory + XP
 12. Lobby reinit → guides 3011→3012 → UpdateUserGuide
 13. Guide 3021: PlayerActorListOwnedCardAfter → Guide 3022
 14. OnePieceEquipItem (hero 100017) → equip 6 slots, consume items
@@ -630,178 +515,135 @@ The Hyper Heroes tutorial is a rigid and strictly server-orchestrated sequence. 
 20. Tutorial gacha → Lotto (RMBFree) → ShowNewCard (hero 100060) → hero added
 ```
 
-### Extracted configuration data
+To make this work, I had to extract config data from the game's own CSV tables (pulled from AssetBundles using UABEA):
 
-For the tutorial to work correctly, we needed to extract data from the game's configuration tables (CSV assets):
+```
+DataPlayerActorItemConfig.csv  — actorId_quality → [6 itemIds] per hero/tier
+DataItem.csv                   — item table (id, name, type, stackSize)
+DataLevel.csv                  — level config (id, drops, energy)
+DataLevelBossDrop.csv          — drop tables: levelId → [{itemId, count}]
+DataEquipment.csv              — equipment stats
+```
 
-- **`DataPlayerActorItemConfig.csv`** — Map `actorId_quality → [6 itemIds]` for each hero/tier
-- **`DataItem.csv`** — Item table (id, name, type, stackSize)
-- **`DataLevel.csv`** — Level configuration (id, drops, energy)
-- **`DataLevelBossDrop.csv`** — Drop tables (levelId → [{itemId, count}])
-- **`DataEquipment.csv`** — Equipment and stats
+**The inventory pre-seed trap.** The original server didn't start you with an empty inventory. It pre-loaded the items needed to equip both starter heroes at quality 10:
 
-These CSVs were extracted from Unity AssetBundles using **UABEA** (Unity Asset Bundle Extractor Avalonia).
+```
+Hero 100003: [800010×2, 800015×2, 800004×1, 800110×1]
+Hero 100017: [800009×2, 800008×2, 800000×1, 800006×1]
+```
 
-### Inventory pre-seed
+Without these, the tutorial hard-locks at the equipment step. It tells you to equip items you don't have. Took a while to figure out these items weren't supposed to come from drops — they're just... there, from the start.
 
-A crucial discovery: the original server pre-loaded the inventory with the items needed to equip the starter heroes at quality 10:
-
-- Hero 100003: `[800010×2, 800015×2, 800004×1, 800110×1]`
-- Hero 100017: `[800009×2, 800008×2, 800000×1, 800006×1]`
-
-Without this, the tutorial got stuck at the equipment step because the inventory was empty.
-
-### SyncConfigResponse — The mega-configuration
-
-The `CommonUserData` needed to include, in field 1 (`SyncConfigResponse`), a functional `SyncLottoTimeResponse` so the gacha wouldn't crash:
+**The gacha config trap.** `CommonUserData` has to include a `SyncLottoTimeResponse` inside `SyncConfigResponse` (field 1). Without it, the gacha module's `m_lottoArray` stays null and the lotto callback throws `NullReferenceException`. The response needs:
 
 ```
 SyncLottoTimeResponse {
-  F1 = SecsToGoldFree (0 = free pull available)
-  F2 = SecsToRmbFreeSecs (0 = free pull available)
+  F1 = SecsToGoldFree (0 = free pull ready)
+  F2 = SecsToRmbFreeSecs (0 = free pull ready)
   F3 = repeated LottoAwards [Gold (type=1), RMB (type=2)]
   F4 = repeated AllLottoPoolActors [8 heroes with actorId]
 }
 ```
 
-Without this, `NDataLottoPackage.m_lottoArray` remained null and the gacha callback crashed with `NullReferenceException`.
-
 ---
 
-## 13. Phase 12 — Cash Server (Billing)
+## 13. The Cash Server
 
-### Motivation
+The game's billing went through a separate server at `39.107.237.64:8080`. Dead now, obviously.
 
-The original game communicated with a separate billing server (`39.107.237.64:8080` and `47.90.247.46:9150`) to verify purchases, check diamond balance, and process transactions.
-
-### Implementation (cash-server/)
-
-The cash-server is a standalone Express server that operates in **FORCE_SUCCESS mode** (default) — never contacts upstream, always returns fake success with maximum values:
+`cash-server/server.js` — standalone Express server in permanent FORCE_SUCCESS mode. Never contacts upstream. Every request gets a fake success with maxed values:
 
 ```javascript
 const MAX = 2147483647; // INT_MAX
 
 function makeFakeSuccess(pathname) {
-    // Returns maximum balance for any balance query
+    const p = pathname.toLowerCase();
+
+    // Balance check? You're rich.
     if (p.includes('balance') || p.includes('diamond')) {
         return { code: 0, data: { balance: MAX, rmb: MAX, diamond: MAX } };
     }
-    // Returns success for any purchase
+
+    // Purchase? Done. Still rich.
     if (p.includes('topup') || p.includes('purchase')) {
         return { code: 0, data: { orderId: 'LOCAL_' + Date.now(), status: 1, rmb: MAX } };
     }
+
+    // VIP? Level 10, no expiration.
+    // Any field named rmb/diamond/crystal/gem/coin/balance → INT_MAX
     // ...
 }
 ```
 
-### Features
+Client-side Frida hooks complete the picture:
 
-1. **Balance queries** → Always returns `INT_MAX` for all currency fields
-2. **Order creation** → Generates fake local orderId
-3. **Payment verification** → Always returns success
-4. **VIP status** → VIP level 10 with no expiration
-5. **Diamond patching** — Recursively replaces numeric fields in JSON responses (`rmb`, `diamond`, `crystal`, `gem`, `coin`, `balance`, etc.) with `INT_MAX`
+```javascript
+// NManagerChannel.Pay()      → auto-triggers PayOver(EProductResult.Success=1)
+// NGooglePay.purchase()      → blocked via Java hook (no Play Store UI)
+// NManagerChannel.IsGuest    → forced false (unlocks purchase flow)
+// PlayerInfo.get_Rmb()       → always returns INT_MAX
+// NManagerGame.SubPlayerRmb  → no-op (diamonds never decrease)
+```
 
-### Integration with Frida
-
-On the client side, Frida hooks complement:
-
-- `NManagerChannel.Pay()` → After each call, injects `PayOver(EProductResult.Success=1)` automatically
-- `NGooglePay.purchase()` → Blocked via Java hook (no Google Play UI appears)
-- `NManagerChannel.get_IsGuest()` → Forced `false` to unlock purchases
-- `PlayerInfo.get_Rmb()` → Always returns `INT_MAX`
-- `NManagerGame.SubPlayerRmb()` → No-op (diamonds never decrement)
+Port 3001. `node cash-server/server.js`. Done.
 
 ---
 
-## 14. Phase 13 — Critical Bugs and How They Were Fixed
+## 14. The Bug Graveyard
 
-### Bug #1: SIGSEGV — Responses with 2 segments instead of 3
+Each of these took hours to find and minutes to fix. Classic.
 
-**Symptom:** Immediate crash upon receiving any NRpc response.
+**#1 — SIGSEGV: The Missing Third Segment**
 
-**Cause:** The server was sending `[header, body]` (2 segments), but the original protocol uses `[header, body, commonResponse]` (3 segments). The 3rd segment is an encrypted protobuf "common response" (`{1: {1:1, 2:0, 4:0}}`).
+Server sends `[header, body]` → client dies instantly. Turns out NRpc ALWAYS sends 3 segments for responses: `[header, body, commonResponse]`. The third is an encrypted protobuf blob: `{1: {1:1, 2:0, 4:0}}`. Without it, deserialization reads past the segment array. Unmapped memory. SIGSEGV.
 
-**Fix:** Added constant `COMMON_RESPONSE_RAW` and function `buildCommonResponseSeg()`. All RPCs (except XDLogin, HeartBeat, and Chat RPCs) now send 3 segments.
+Fix: `COMMON_RESPONSE_RAW` constant + `buildCommonResponseSeg()`. Every RPC response (except XDLogin, HeartBeat, Chat RPCs) now sends all three.
 
-### Bug #2: LevelEnd — "Index was out of range"
+**#2 — LevelEnd: "Index was out of range"**
 
-**Symptom:** Crash in the LevelEnd `b__0` callback after completing level 300101.
+Complete level 300101, callback `b__0` crashes with `ArgumentOutOfRangeException`. The callback does `for i in GetDropItem: GetOwnedStuffInfo(i)`. Level 300101 drops `[{800010, ×2}, {800010, ×2}]` — two entries for the same item. I merged them into one inventory entry. Callback expected two.
 
-**Cause:** Field 92 (`StuffInfo[]`) of the `LevelEndResponse` had fewer entries than field 7 (`LevelDropItem[]`). The callback iterates through drops and accesses `GetOwnedStuffInfo(idx)` for each one. Level 300101 drops `[{800010, ×2}, {800010, ×2}]` — the inventory merged into 1 entry, but the callback expected 2.
+Rule: `count(StuffInfo[]) == count(LevelDropItem[])`. Always. One StuffInfo per drop line. Not per unique item. If two drops reference the same itemId, emit two StuffInfo entries pointing to the same stuffId.
 
-**Fix:** Emit 1 StuffInfo PER drop item (not per unique item), referencing the same stuffId when the itemId repeats.
+**#3 — GetMonthOperActivityDot: Wrong Field**
 
-**Critical rule:** `count(StuffInfo[]) == count(LevelDropItem[])` — ALWAYS.
+Lobby crashes on load. Generic stub returns `pbFieldVarint(127, 0)`. Client expects `pbFieldVarint(1, 0)` — field 1, isHasActivity = false. Field 127 means nothing to the parser.
 
-### Bug #3: GetMonthOperActivityDot — incorrect body
+One line fix. Separated from the stub group.
 
-**Symptom:** Crash when entering the lobby.
+**#4 — OnePieceEquipItem: Where Are My Items?**
 
-**Cause:** Body was `pbFieldVarint(127, 0)` (generic stub), but the client expects `pbFieldVarint(1, 0)` (field 1 = isHasActivity = false).
+Tutorial freezes at equipment step. Inventory's empty. The quality-10 equip items aren't drops — they're supposed to be pre-seeded at account creation. Nobody told me.
 
-**Fix:** Separated from the stub group and returns the correct field.
+Fix: pre-seed the inventory with both starter heroes' equipment items on account creation.
 
-### Bug #4: OnePieceEquipItem — empty inventory
+**#5 — Double Quality Promotion**
 
-**Symptom:** Tutorial got stuck at the equipment step.
+Hero goes from quality 10 straight to 21, skipping 20. `OnePieceEquipItem` was doing an internal promotion (10→20), then `QualityUp` promoted again (20→21). They're separate RPCs. Separate responsibilities.
 
-**Cause:** Account created with `inventory: new Map()` empty. The quality-10 items didn't come from any drop.
+Fix: strip promotion from `OnePieceEquipItem`. It only equips now. `QualityUp` owns all promotions.
 
-**Fix:** Pre-seed the inventory with quality-10 items from both starter heroes at account creation.
+**#6 — Gacha NullReferenceException (Triple Kill)**
 
-### Bug #5: Double quality promotion
+Open gacha, client dies. Three things wrong simultaneously:
 
-**Symptom:** Hero jumped from quality 10 straight to 21.
+1. `OpenLottoHmi` returned stub instead of hero pool
+2. `Lotto` returned bad StuffInfo without `ShowNewCard`
+3. `CommonUserData` missing `SyncLottoTimeResponse` → `m_lottoArray` = null
 
-**Cause:** `OnePieceEquipItem` was promoting internally (10→20), and then `QualityUp` promoted again (20→21). They are separate RPCs.
-
-**Fix:** Removed promotion from `OnePieceEquipItem`. Now it only equips items. Promotion is 100% handled by `QualityUp`.
-
-### Bug #6: Gacha — NullReferenceException on Lotto
-
-**Symptom:** Crash when opening gacha during the tutorial.
-
-**Cause (triple):**
-1. `OpenLottoHmi` returned an empty stub instead of a hero pool
-2. `Lotto` returned invalid StuffInfo without `ShowNewCard`
-3. `CommonUserData` didn't include `SyncLottoTimeResponse` — leaving `m_lottoArray` null
-
-**Fix (triple):**
-1. `OpenLottoHmi` → returns 8 heroes with actorIds
-2. `Lotto` → rewritten with `ShowNewCard`, `OwnedCardInfo`, hero persistence
-3. `CommonUserData` → added `SyncLottoTimeResponse` in `SyncConfigResponse`
+All three had to be fixed together. `OpenLottoHmi` now returns 8 heroes. `Lotto` got rewritten with proper `ShowNewCard` + `OwnedCardInfo` + persistence. `CommonUserData` got the lotto config stuffed into `SyncConfigResponse`.
 
 ---
 
-## 15. Final Result
+## 15. What Works Now
 
-### What works
-
-| Feature | Status |
-|---|---|
-| Full guest login | ✅ |
-| 35 Addressables + 126 AssetBundles | ✅ Local mirror |
-| Patched Addressables catalog | ✅ |
-| 15+ HTTP bootstrap endpoints | ✅ |
-| NRpc protocol (Lobby, Game, Chat) | ✅ |
-| Complete tutorial (intro → battle → equip → quality up → gacha) | ✅ |
-| Equipment system | ✅ |
-| Quality promotion | ✅ |
-| Functional gacha | ✅ |
-| Infinite Diamonds/Gold | ✅ |
-| Purchases without Google Play | ✅ |
-| Cash server with fake billing | ✅ |
-| 25 Frida hooks (passive observation) | ✅ |
-| Automated build pipeline | ✅ |
-
-### Final stack
+Full guest login. 35 Addressables + 126 AssetBundles served locally. Patched catalog with dynamic URL rewriting. 15+ HTTP bootstrap endpoints. Full NRpc protocol across Lobby, Game, and Chat. Complete tutorial from intro cutscene through battles, equipment, quality promotion, gacha. Equipment system. Quality promotion. Working gacha. Infinite diamonds and gold. Purchases without Google Play. Fake billing server. 25 passive Frida hooks. Automated build pipeline — patches, rebuilds, signs the APK in one script.
 
 ```
 ┌──────────────────────────────────────────────┐
 │           Motorola (ARM64, Android)          │
 │  ┌────────────────────────────────────────┐  │
-│  │  Hyper Heroes (APK patchado)          │  │
+│  │  Hyper Heroes (patched APK)           │  │
 │  │  + Frida hooks (hhproxy.js, 25 hooks) │  │
 │  └─────────────────┬──────────────────────┘  │
 │                    │ WiFi LAN                 │
@@ -819,38 +661,29 @@ On the client side, Frida hooks complement:
 │  └────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────┐  │
 │  │  cash-server (Node.js)                 │  │
-│  │  └── HTTP :3001 (billing fake)         │  │
+│  │  └── HTTP :3001 (fake billing)         │  │
 │  └────────────────────────────────────────┘  │
 └──────────────────────────────────────────────┘
 ```
 
 ---
 
-## 16. Lessons Learned
+## 16. What I Learned
 
-### 1. ARM emulators are not suitable for IL2CPP hooks
-The houdini/ndk_translation layer corrupts Frida's Interceptor. Real ARM64 devices are mandatory for IL2CPP binary instrumentation.
+**Emulators are useless for IL2CPP hooking.** The houdini/ndk_translation layer doesn't just slow things down — it makes Frida's Interceptor corrupt memory. Real ARM64 silicon or nothing.
 
-### 2. The third NRpc segment is mandatory
-Without the `commonResponse` (3rd segment), the client crashes with SIGSEGV. This wasn't evident in the initial PCAPs because the segments looked like "just another byte" — it took hours of debugging to identify.
+**The third NRpc segment exists and it's mandatory.** Without the `commonResponse` blob, SIGSEGV. Didn't show up obviously in the PCAPs — looked like "just another few bytes." Hours of staring at hex dumps to figure out.
 
-### 3. Counters must match exactly
-The `LevelEnd.b__0` callback iterates through `GetDropItem(idx)` and accesses `GetOwnedStuffInfo(idx)` for each one. If there are 2 drops but 1 StuffInfo (because we merged duplicates), the second access crashes. The rule is: **1 StuffInfo per drop item, not per unique item**.
+**Array counters must match exactly.** LevelEnd callback does `for i in dropItems: stuffInfos[i]`. Merged duplicate drops into fewer StuffInfo entries thinking I was being smart? Congrats — out-of-bounds crash. One StuffInfo per drop line. Always.
 
-### 4. PCAPs + IL2CPP dump + Frida = powerful trio
-- PCAPs show the real binary format
-- The dump shows field names and types
-- Frida confirms in real time and enables crash debugging
+**PCAPs + IL2CPP dump + Frida = the holy trinity of mobile RE.** PCAPs show what the wire looks like. The dump shows what the code expects. Frida shows what actually happens at runtime. You need all three. Two out of three and you're guessing.
 
-### 5. The tutorial is a server-side state machine
-Each `UpdateUserGuide` persists a bitmask. If the server doesn't save correctly, the tutorial repeats or skips steps, causing inconsistent states.
+**The tutorial is an unforgiving server-side state machine.** Each `UpdateUserGuide` persists a bitmask. Get it wrong, tutorial loops or soft-locks. The server must track every guide completion exactly as the original did.
 
-### 6. Documenting everything prevents future crashes
-The 800+ line `README.md` and this write-up document every decision. When a new NRpc method needs to be implemented, the pattern is already established.
+**Document everything.** The 800+ line `README.md` and this write-up exist because past-me kept forgetting why things were done a certain way. Next NRpc method that needs implementing? Pattern's already here.
 
-### 7. Mirror assets while the CDNs are still alive
-Game servers die first, but CDNs (S3, CloudFront) usually stay online longer. The preventive mirror saved the project.
+**Mirror assets while you still can.** Game servers die first. CDNs (S3, CloudFront) survive longer — just static file hosting, nobody remembers to turn it off. That window closes eventually. Mirror early, mirror everything.
 
 ---
 
-*Phyper Project — March 2026*
+*Phyper — March 2026*
