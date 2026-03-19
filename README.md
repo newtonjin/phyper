@@ -28,7 +28,7 @@ They even said it at their Reddit:::
 11. [Patching the APK](#11-patching-the-apk)
 12. [Tutorial Hell](#12-tutorial-hell)
 13. [The Cash Server](#13-the-cash-server)
-GGS. [GGS!](#GGs!-I-can-play-locally-now!)
+666. [GGS!](#GGs!-I-can-play-locally-now!)
 14. [What I Learned](#14-what-i-learned)
 
 ---
