@@ -570,29 +570,8 @@ The Hyper Heroes tutorial is a nightmare. Rigid, strictly server-orchestrated st
 
 The full sequence I mapped through Frida (every line was pain):
 
-```
- 1. HTTP bootstrap: queryList → guestlogin → accountList → checkServerStatus → myip
- 2. TCP Lobby (9150): SendConnect → XDLogin → CommonUserData
- 3. TCP Chat (9152): SendConnect → LoginChat
- 4. Lobby RPCs: OpenTreasurePage, GetFriends, GetBlackList, SyncRankingAward,
-    LevelData×2, SyncEvent, SyncOperActivity, GetPlayerEvent (stubs OK)
- 5. Continuous HeartBeats (Lobby 9150 + Chat 9152)
- 6. Tutorial guides: introId 4899→4913 (intro cutscene)
- 7. Lobby init: Awake → Start → InitFunctionMap
- 8. GetMonthOperActivityDot, GetCeremonyExchange, etc.
- 9. UIGuide introId=2 → UpdateUserGuide → introId=3 → PlayerTeam → UpdatePlayerTeam
-10. LevelStart (levelId=300101) → Tutorial battle guides (1001→1012)
-11. LevelEnd (compound RPC, 3 segments) → drops + inventory + XP
-12. Lobby reinit → guides 3011→3012 → UpdateUserGuide
-13. Guide 3021: PlayerActorListOwnedCardAfter → Guide 3022
-14. OnePieceEquipItem (hero 100017) → equip 6 slots, consume items
-15. Guide 3023 → QualityUp (hero 100017) → quality 10→20
-16. Guides 3024→3026 → UpdatePlayerTeam (team: 260398;260397)
-17. LevelStart (levelId=300102) → Tutorial battle guides
-18. LevelEnd (level 300102)
-19. Lobby reinit → OpenLottoHmi (pool of 8 heroes)
-20. Tutorial gacha → Lotto (RMBFree) → ShowNewCard (hero 100060) → hero added
-```
+<img width="896" height="447" alt="image" src="https://github.com/user-attachments/assets/5306ca30-fc14-497c-af3f-a2632667c725" />
+
 
 To make this work, I had to extract config data from the game's own CSV tables (pulled from AssetBundles using UABEA):
 
